@@ -7,6 +7,7 @@
   ******************************************************************************
   */
 #include "usbd_cdc_if.h"
+#include "usb_link.h"
 
 #define APP_RX_DATA_SIZE  64
 #define APP_TX_DATA_SIZE  64
@@ -56,9 +57,9 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t *pbuf, uint16_t length)
    volver a armar el buffer de recepcion para que la pila USB no se cuelgue. */
 static int8_t CDC_Receive_FS(uint8_t *Buf, uint32_t *Len)
 {
+  usb_link_on_receive(Buf, *Len);      /* comandos de la PC, ver usb_link.c */
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-  UNUSED(Len);
   return (USBD_OK);
 }
 

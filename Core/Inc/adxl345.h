@@ -80,6 +80,10 @@ typedef struct {
 adxl345_status_t adxl345_init(adxl345_t *dev, const adxl345_bus_t *bus,
                               adxl345_rate_t rate, adxl345_range_t range);
 
+/** Envia DATA_READY al pin INT1 (activo en alto) y la habilita. El pin queda
+  * en alto mientras haya una muestra sin leer y baja al leer los datos. */
+adxl345_status_t adxl345_enable_data_ready_int1(adxl345_t *dev);
+
 /** Lee INT_SOURCE. Los bits DATA_READY y OVERRUN se actualizan siempre,
   * aunque las interrupciones no esten habilitadas. */
 adxl345_status_t adxl345_read_int_source(adxl345_t *dev, uint8_t *int_source);
@@ -87,6 +91,16 @@ adxl345_status_t adxl345_read_int_source(adxl345_t *dev, uint8_t *int_source);
 /** Lee los 6 registros de datos en una sola transferencia (asi los 3 ejes
   * son de la misma muestra). Leerlos limpia DATA_READY y OVERRUN. */
 adxl345_status_t adxl345_read_xyz(adxl345_t *dev, adxl345_sample_t *out);
+
+/* Lectura en bloque para el muestreo por interrupcion: 8 registros seguidos
+   desde INT_SOURCE (0x30): INT_SOURCE, DATA_FORMAT y DATAX0..DATAZ1. Una
+   sola transferencia trae la muestra y el bit OVERRUN de esa misma muestra. */
+#define ADXL345_BLOCK_REG        ADXL345_REG_INT_SOURCE
+#define ADXL345_BLOCK_LEN        8U
+
+/** Interpreta los ADXL345_BLOCK_LEN bytes leidos desde ADXL345_BLOCK_REG.
+  * Devuelve el valor de INT_SOURCE (antes de la lectura). */
+uint8_t adxl345_parse_block(const uint8_t *block, adxl345_sample_t *out);
 
 /** ODR en Hz que corresponde a un codigo de BW_RATE. */
 uint32_t adxl345_rate_hz(adxl345_rate_t rate);

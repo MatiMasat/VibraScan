@@ -60,6 +60,9 @@ void Error_Handler(void);
 
 #define LED_Pin GPIO_PIN_13
 #define LED_GPIO_Port GPIOC
+#define ADXL_INT1_Pin GPIO_PIN_0
+#define ADXL_INT1_GPIO_Port GPIOB
+#define ADXL_INT1_EXTI_IRQn EXTI0_IRQn
 
 /* USER CODE BEGIN Private defines */
 

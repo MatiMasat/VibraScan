@@ -1,5 +1,5 @@
 """
-VibraScan - prueba de la etapa 1.
+VibraScan - prueba de la etapa 2.
 
 Captura unos segundos de lo que manda la Black Pill por el puerto COM virtual
 y dice si la etapa funciona: sensor detectado, tasa de muestreo correcta,
@@ -10,9 +10,10 @@ Formato que manda el firmware (ver Core/Src/app.c):
     # estado=OK clave=valor ... una linea de estado por segundo
 
 Uso:
-    python etapa1_prueba.py --list
-    python etapa1_prueba.py --port COM5
-    python etapa1_prueba.py --port COM5 --seconds 20 --plot
+    python etapa2_prueba.py --list
+    python etapa2_prueba.py --port COM5
+    python etapa2_prueba.py --port COM5 --seconds 20 --plot
+    python etapa2_prueba.py --port COM5 --odr 100 400 800
 
 Dejar el sensor quieto durante la prueba.
 """
@@ -31,7 +32,10 @@ import serial.tools.list_ports
 G_PER_LSB = 0.0039        # FULL_RES: 3.9 mg/LSB en cualquier rango
 RATE_TOLERANCE = 0.05     # la tasa medida puede diferir 5 % del ODR nominal
 GRAVITY_TOLERANCE = 0.10  # el modulo en reposo puede diferir 10 % de 1 g
-COUNTERS = ("ovr", "i2c_err", "drop")
+PERIOD_TOLERANCE = 1.5    # periodo entre flancos: entre 1/1,5 y 1,5 veces el medio
+SETTLE_S = 2.5            # espera despues de cambiar el ODR (leyendo y descartando)
+PURGE_S = 1.0             # descarte inicial sin cambio de ODR
+COUNTERS = ("ovr", "i2c_err", "drop", "stall", "bfull")
 
 
 def list_ports():
@@ -64,11 +68,34 @@ def parse_sample(line):
     return n, x, y, z
 
 
-def capture(port, seconds):
-    """Lee el puerto durante 'seconds' y devuelve (muestras, estados, lineas_invalidas)."""
+def set_odr(ser, odr):
+    """Manda 'odr=<Hz>' y espera la respuesta '> ...'. Devuelve el texto de la respuesta."""
+    ser.reset_input_buffer()
+    ser.write(f"odr={odr}\n".encode("ascii"))
+    t_end = time.monotonic() + 2.0
+    while time.monotonic() < t_end:
+        line = ser.readline().decode("ascii", errors="replace").strip()
+        if line.startswith(">"):
+            return line
+    return "> sin respuesta del firmware"
+
+
+def capture(port, seconds, odr=None):
+    """Lee el puerto durante 'seconds' y devuelve (muestras, estados, lineas_invalidas).
+    Si se pasa odr, antes cambia el ODR del sensor y espera a que se estabilice."""
     samples, statuses, bad = [], [], 0
     pending = b""
     with serial.Serial(port, 115200, timeout=0.1) as ser:
+        if odr is not None:
+            print(f"  {set_odr(ser, odr)}")
+        # Mientras nadie lee el puerto, el buffer de la placa se llena y guarda
+        # muestras viejas. Se lee y descarta un rato (sin dormir: si no se lee,
+        # Windows deja de pedir datos y el buffer se vuelve a llenar) para que
+        # la captura empiece con datos frescos. Despues de cambiar el ODR se
+        # espera mas: el primer segundo despues del cambio es mixto.
+        t_settle = time.monotonic() + (SETTLE_S if odr is not None else PURGE_S)
+        while time.monotonic() < t_settle:
+            ser.read(ser.in_waiting or 1)
         ser.reset_input_buffer()
         first_line = True
         t_end = time.monotonic() + seconds
@@ -83,7 +110,7 @@ def capture(port, seconds):
                 if first_line:
                     first_line = False   # puede venir cortada: se descarta
                     continue
-                if not line:
+                if not line or line.startswith(">"):
                     continue
                 if line.startswith("#"):
                     statuses.append(parse_status(line))
@@ -104,7 +131,7 @@ def evaluate(samples, statuses, bad):
     # 1) Sensor detectado
     if not statuses:
         checks.append(("Linea de estado recibida", False,
-                       "no llego ninguna linea '#': revisar que el firmware sea el de la etapa 1"))
+                       "no llego ninguna linea '#': revisar que el firmware sea el de la etapa 2"))
         return checks, None
     last = statuses[-1]
     sensor_ok = last.get("estado") == "OK" and last.get("devid", "").upper() == "0XE5"
@@ -131,6 +158,34 @@ def evaluate(samples, statuses, bad):
                        f"{rate:.2f} muestras/s medidas, ODR configurado {odr:.0f} Hz"))
     else:
         checks.append(("Tasa de muestreo", False, "captura muy corta para medirla"))
+
+    # 2b) INT1 -> PB0: flancos de DATA_READY por segundo, contados por el micro.
+    #     Se descarta la primera linea (su segundo puede estar incompleto).
+    int1 = [int(s["int1"]) for s in ok_statuses[1:] if "int1" in s]
+    if int1:
+        int1_rate = statistics.fmean(int1)
+        int1_ok = odr > 0 and abs(int1_rate - odr) <= RATE_TOLERANCE * odr
+        detail = f"{int1_rate:.1f} flancos/s en PB0, ODR configurado {odr:.0f} Hz"
+        if int1_rate == 0:
+            detail += " -> revisar el cable INT1 -> PB0"
+        checks.append(("INT1 conectado", int1_ok, detail))
+    else:
+        checks.append(("INT1 conectado", False, "el firmware no informa int1 o la captura es muy corta"))
+
+    # 2c) Periodo entre flancos de INT1, medido por el micro (tmin/tmax en us
+    #     por segundo). Un flanco perdido hace que tmax llegue a ~2 periodos.
+    periods = [(int(s["tmin"]), int(s["tmax"])) for s in ok_statuses[1:]
+               if "tmin" in s and int(s.get("tmin", 0)) > 0]
+    if periods and rate:
+        nominal_us = 1e6 / rate
+        tmin = min(p[0] for p in periods)
+        tmax = max(p[1] for p in periods)
+        period_ok = tmax <= PERIOD_TOLERANCE * nominal_us and tmin >= nominal_us / PERIOD_TOLERANCE
+        checks.append(("Periodo estable", period_ok,
+                       f"entre {tmin} y {tmax} us (medio {nominal_us:.0f} us), "
+                       f"variacion {tmax - tmin} us"))
+    elif "tmin" in last:
+        checks.append(("Periodo estable", False, "captura muy corta para medirlo"))
 
     # 3) Secuencia sin saltos
     gaps = sum(1 for a, b in zip(samples, samples[1:]) if b[0] != a[0] + 1)
@@ -189,7 +244,7 @@ def plot(samples, fs):
         ax.plot(t, [s[i] * G_PER_LSB for s in samples], label=name, linewidth=0.8)
     ax.set_xlabel("Tiempo [s]")
     ax.set_ylabel("Aceleracion [g]")
-    ax.set_title(f"VibraScan etapa 1 - fs = {fs:.0f} Hz")
+    ax.set_title(f"VibraScan etapa 2 - fs = {fs:.0f} Hz")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right")
     fig.tight_layout()
@@ -201,9 +256,12 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", help="Puerto serie, ej: COM5")
     parser.add_argument("--seconds", type=float, default=10.0, help="Duracion de la captura (default: 10)")
-    parser.add_argument("--csv", default=None, help="CSV de salida (default: capturas/etapa1_<fecha>.csv)")
+    parser.add_argument("--csv", default=None, help="CSV de salida (default: capturas/etapa2_<fecha>.csv)")
     parser.add_argument("--plot", action="store_true", help="Grafica la captura al terminar")
     parser.add_argument("--list", action="store_true", help="Lista los puertos serie y termina")
+    parser.add_argument("--odr", type=int, nargs="+", default=[None], metavar="HZ",
+                        help="ODR a configurar antes de capturar; con varios valores "
+                             "prueba cada uno (ej: --odr 100 400 800). Sin esto usa el actual")
     args = parser.parse_args()
 
     if args.list:
@@ -213,12 +271,26 @@ def main():
         print("Falta --port (usa --list para ver los puertos disponibles).")
         return 2
 
-    print(f"Capturando {args.seconds:.0f} s de {args.port}. Dejar el sensor quieto...")
+    all_passed = True
+    for odr_req in args.odr:
+        passed = run_one(args, odr_req)
+        all_passed = all_passed and passed
+    if len(args.odr) > 1:
+        print()
+        print("RESULTADO GENERAL: " + ("ETAPA 2 APROBADA" if all_passed else "ETAPA 2 CON FALLAS"))
+    return 0 if all_passed else 1
+
+
+def run_one(args, odr_req):
+    """Captura y evalua con un ODR. Devuelve True si pasaron todos los chequeos."""
+    print()
+    print(f"Capturando {args.seconds:.0f} s de {args.port}"
+          + (f" con ODR = {odr_req} Hz" if odr_req else "") + ". Dejar el sensor quieto...")
     try:
-        samples, statuses, bad = capture(args.port, args.seconds)
+        samples, statuses, bad = capture(args.port, args.seconds, odr_req)
     except serial.SerialException as e:
         print(f"No se pudo leer {args.port}: {e}")
-        return 2
+        return False
 
     checks, rate = evaluate(samples, statuses, bad)
     print()
@@ -226,19 +298,21 @@ def main():
         print(f"  [{'OK   ' if ok else 'FALLA'}] {name}: {detail}")
     passed = all(ok for _, ok, _ in checks)
     print()
-    print("ETAPA 1 APROBADA" if passed else "ETAPA 1 CON FALLAS")
+    print("ETAPA 2 APROBADA" if passed else "ETAPA 2 CON FALLAS")
 
     if samples:
         # El reloj del sensor no es exacto (ej. 99,3 Hz para 100 Hz nominal):
         # para el eje de tiempo se usa la tasa medida si la hay.
         odr = float(statuses[-1].get("odr", "0") or 0) if statuses else 0.0
         fs = rate or odr or 100.0
-        path = args.csv or os.path.join("capturas", f"etapa1_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+        suffix = f"_{odr:.0f}hz" if odr else ""
+        path = args.csv or os.path.join(
+            "capturas", f"etapa2_{time.strftime('%Y%m%d_%H%M%S')}{suffix}.csv")
         save_csv(path, samples, fs)
         print(f"Datos guardados en {path}")
         if args.plot:
             plot(samples, fs)
-    return 0 if passed else 1
+    return passed
 
 
 if __name__ == "__main__":

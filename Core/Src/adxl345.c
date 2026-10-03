@@ -64,9 +64,26 @@ adxl345_status_t adxl345_init(adxl345_t *dev, const adxl345_bus_t *bus,
   return wr_verify(dev, ADXL345_REG_POWER_CTL, POWER_CTL_MEASURE);
 }
 
+adxl345_status_t adxl345_enable_data_ready_int1(adxl345_t *dev)
+{
+  /* INT_MAP: bit en 0 = esa interrupcion sale por INT1. Se mapea antes de
+     habilitar para que nunca aparezca por INT2. */
+  adxl345_status_t st = wr_verify(dev, ADXL345_REG_INT_MAP, 0x00);
+  if (st != ADXL345_OK) return st;
+  return wr_verify(dev, ADXL345_REG_INT_ENABLE, ADXL345_INT_DATA_READY);
+}
+
 adxl345_status_t adxl345_read_int_source(adxl345_t *dev, uint8_t *int_source)
 {
   return rd(dev, ADXL345_REG_INT_SOURCE, int_source, 1);
+}
+
+/* 16 bits en complemento a 2, byte bajo primero */
+static void decode_xyz(const uint8_t *d, adxl345_sample_t *out)
+{
+  out->x = (int16_t)(((uint16_t)d[1] << 8) | d[0]);
+  out->y = (int16_t)(((uint16_t)d[3] << 8) | d[2]);
+  out->z = (int16_t)(((uint16_t)d[5] << 8) | d[4]);
 }
 
 adxl345_status_t adxl345_read_xyz(adxl345_t *dev, adxl345_sample_t *out)
@@ -76,12 +93,16 @@ adxl345_status_t adxl345_read_xyz(adxl345_t *dev, adxl345_sample_t *out)
 
   if (st == ADXL345_OK)
   {
-    /* 16 bits en complemento a 2, byte bajo primero */
-    out->x = (int16_t)(((uint16_t)d[1] << 8) | d[0]);
-    out->y = (int16_t)(((uint16_t)d[3] << 8) | d[2]);
-    out->z = (int16_t)(((uint16_t)d[5] << 8) | d[4]);
+    decode_xyz(d, out);
   }
   return st;
+}
+
+uint8_t adxl345_parse_block(const uint8_t *block, adxl345_sample_t *out)
+{
+  /* block[0] = INT_SOURCE, block[1] = DATA_FORMAT, block[2..7] = datos */
+  decode_xyz(&block[ADXL345_REG_DATAX0 - ADXL345_BLOCK_REG], out);
+  return block[0];
 }
 
 uint32_t adxl345_rate_hz(adxl345_rate_t rate)

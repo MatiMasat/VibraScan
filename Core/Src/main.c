@@ -58,6 +58,26 @@ static void MX_I2C1_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/* Despues de un reset con el cable conectado (por ejemplo al grabar con el
+   ST-Link) la PC no se entera de que el dispositivo se desconecto y la nueva
+   enumeracion falla ("Dispositivo USB desconocido"). Mantener D+ (PA12) en
+   bajo unos milisegundos simula la desconexion. MX_USB_DEVICE_Init() vuelve
+   a configurar el pin para el USB. */
+static void usb_force_reenumeration(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+  GPIO_InitStruct.Pin = GPIO_PIN_12;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_Delay(20);
+  HAL_GPIO_DeInit(GPIOA, GPIO_PIN_12);
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -84,7 +104,7 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  usb_force_reenumeration();
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -177,7 +197,7 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 100000;
+  hi2c1.Init.ClockSpeed = 400000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
@@ -223,6 +243,16 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : ADXL_INT1_Pin (INT1 del ADXL345; pull-down para que
+    sin cable quede en bajo y no genere interrupciones falsas) */
+  GPIO_InitStruct.Pin = ADXL_INT1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(ADXL_INT1_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init: se habilita recien en app_init(), con el sensor configurado */
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 1, 0);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
