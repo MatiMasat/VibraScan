@@ -5,7 +5,17 @@ con un ADXL345 sobre una Black Pill (STM32F411CEU6). Se construye por etapas;
 cada una se prueba sola antes de sumar la siguiente. Cada etapa aprobada tiene
 un tag en git (`etapa-1`, `etapa-2`, ...).
 
-## Etapa 3 - buffer por bloques y trama binaria con checksum (en curso)
+## Etapa 3 - buffer por bloques y trama binaria con checksum (aprobada, tag `etapa-3`)
+
+Aprobada el 2026-10-04 en la placa. `etapa3_prueba.py` sin fallas a 100, 400
+y 800 Hz (20 s cada uno) y 10 minutos a 800 Hz: 476 800 muestras en 15 503
+tramas, 0 CRC mal, 0 tramas perdidas, 0 muestras descartadas, 0 huecos,
+contadores sin cambios, 794,57 muestras/s, ~5,4 kB/s. Pruebas manuales con
+`monitor_vivo.py`: curva de 10 s completa, ±1 g en cinco caras, golpes de
+hasta 4,6 g sin cortes, cuatro cortes de INT1 de 2,4 a 4,9 s informados
+como `HUECO` con su duración (y `ovr` +1 cada uno) con recuperación sola,
+reapertura y reconexión del USB con arranque limpio. Una pausa de 0,7 s de
+la PC quedó absorbida por el buffer del micro sin perder muestras.
 
 Sobre la etapa 2 (muestreo por interrupción DATA_READY, ver más abajo). Lo
 nuevo:
@@ -180,7 +190,7 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
 | # | Etapa | Se aprueba cuando |
 |---|---|---|
 | 2 | Muestreo por interrupción DATA_READY (INT1 a un pin EXTI) y ODR más alto | muestras/s = ODR, sin saltos (aprobada) |
-| 3 | Buffer por bloques y trama binaria con checksum | minutos sin pérdidas |
+| 3 | Buffer por bloques y trama binaria con checksum | minutos sin pérdidas (aprobada) |
 | 4 | Captura a archivo y gráfico en tiempo | reposo estable, golpe visible |
 | 5 | Preproceso y FFT/PSD en Python | pico en la frecuencia de una fuente conocida |
 | 6 | SPI a 3200 Hz (con el FIFO del ADXL345) | igual que 2 y 3 |
