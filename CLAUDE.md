@@ -18,8 +18,15 @@ https://github.com/MatiMasat/VibraScan.git.
 - `main` tiene solo etapas aprobadas. Cada etapa aprobada lleva un tag anotado
   (`etapa-1`, `etapa-2`, ...): `git checkout etapa-1` vuelve a esa versión.
 - Una etapa nueva se trabaja en la rama `etapa-N`, con un commit por cada paso
-  que funciona. Al aprobarse se mergea a `main`, se pone el tag y se hace push
-  (`git push --follow-tags`).
+  que funciona. Al aprobarse:
+  1. `git switch main` y `git merge --no-ff refs/heads/etapa-N -m "..."`
+     (`--no-ff`: en Git Graph la etapa se ve como rama con sus pasos).
+  2. `git tag -a etapa-N -m "..."` sobre el merge y `git push origin main etapa-N`.
+  3. **Borrar la rama** (`git branch -d etapa-N` y
+     `git push origin --delete refs/heads/etapa-N`): el tag tiene el mismo
+     nombre y, si conviven, git los confunde ("refname is ambiguous"). Los
+     pasos quedan en el historial del merge.
+  Mientras convivan rama y tag, usar `refs/heads/...` y `refs/tags/...`.
 - No se crean más carpetas por etapa (`VibraScan_v3`, etc.). Las carpetas
   `VibraScan/` y `VibraScan_v2/` que están al lado de `repo/` son copias
   viejas; no se usan.
