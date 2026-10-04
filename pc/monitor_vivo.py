@@ -3,9 +3,10 @@ VibraScan - visor en tiempo real de los tres ejes.
 
 Grafica lo que manda la Black Pill por el puerto COM virtual, para ver como
 responde el sensor al moverlo. Ademas registra la sesion en pc/capturas/:
-    monitor_<fecha>.log   eventos (saltos, cortes, golpes, caras, contadores),
-                          una linea por segundo y un resumen al cerrar
-    monitor_<fecha>.csv   todas las muestras crudas (t_pc_s, n, x, y, z)
+    monitor_<fecha>.log   eventos (tramas perdidas, descartes, huecos, CRC,
+                          cortes, golpes, caras, contadores), una linea por
+                          segundo y un resumen al cerrar
+    monitor_<fecha>.csv   todas las muestras crudas (t_pc_s, t_us, n, x, y, z)
     monitor_<fecha>_N.png imagen del grafico: con la tecla "g" y al cerrar
 
 Uso:
@@ -15,7 +16,10 @@ Uso:
     python monitor_vivo.py --port COM8 --no-csv       (no guarda las muestras)
 
 Cerrar la ventana para terminar. El puerto no puede estar abierto por otro
-programa (monitor serie, etapa2_prueba.py) al mismo tiempo.
+programa (monitor serie, etapa3_prueba.py) al mismo tiempo.
+
+Usa el protocolo binario de la etapa 3 (vibrascan_proto.py): al abrir manda
+"start" y al cerrar "stop".
 """
 
 import argparse
@@ -30,7 +34,10 @@ import matplotlib.pyplot as plt
 import serial
 from matplotlib.animation import FuncAnimation
 
-from etapa2_prueba import COUNTERS, G_PER_LSB, RATE_TOLERANCE, parse_sample, parse_status
+import vibrascan_proto as vp
+from etapa2_prueba import G_PER_LSB, RATE_TOLERANCE
+
+COUNTERS = ("ovr", "i2c_err", "drop", "stall", "bfull", "hueco")
 
 AXES = (("X", "tab:blue"), ("Y", "tab:orange"), ("Z", "tab:green"))
 FS_MAX = 3200           # el buffer alcanza para la ventana completa hasta este ODR
@@ -38,6 +45,7 @@ MAX_PLOT_POINTS = 4000  # por eje; con mas, se dibuja 1 de cada k muestras
 CAPTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "capturas")
 
 FREEZE_S = 0.5          # sin muestras durante este tiempo = corte de datos
+                        # (o 3 bloques, si es mas: a 100 Hz un bloque tarda 320 ms)
 SHOCK_G = 0.5           # |a| se aparta de 1 g mas que esto = golpe
 SHOCK_END_S = 0.25      # el golpe termina tras este tiempo por debajo del umbral
 FACE_TOLERANCE_G = 0.15 # cara: un eje a 1 g +/- esto y los otros dos por debajo
@@ -85,20 +93,20 @@ def face_of(x, y, z):
 
 
 class Reader(threading.Thread):
-    """Lee el puerto en segundo plano, guarda las ultimas muestras y registra la sesion."""
+    """Lee las tramas en segundo plano, guarda las ultimas muestras y registra la sesion."""
 
     def __init__(self, port, maxlen, log, csv_path, default_fs, odr=None):
         super().__init__(daemon=True)
-        self.ser = serial.Serial(port, 115200, timeout=0.1)
-        self.odr = odr
+        self.ser = vp.open_stream(port, odr)
         self.log = log
         self.csv = open(csv_path, "w", encoding="ascii") if csv_path else None
         if self.csv:
-            self.csv.write("t_pc_s,n,x,y,z\n")
+            self.csv.write("t_pc_s,t_us,n,x,y,z\n")
         self.fs = default_fs
         self.samples = collections.deque(maxlen=maxlen)   # (n, x_g, y_g, z_g)
         self.status = {}
-        self.gaps = 0
+        self.dec = vp.Decoder()
+        self.chk = vp.Checker()
         self.lock = threading.Lock()
         self.running = True
         self.plot_span = 0.0     # segundos que ocupa la curva (lo escribe el grafico)
@@ -109,6 +117,8 @@ class Reader(threading.Thread):
         self.last_sample_t = None
         self.frozen_since = None
         self.freezes = []          # duracion de cada corte [s]
+        self.holes = []            # (t, ms) de cada hueco
+        self.crc_seen = 0
         self.first_counters = None
         self.last_counters = {}
         self.sps_seen = []
@@ -120,14 +130,9 @@ class Reader(threading.Thread):
         self.faces = []            # caras en el orden en que aparecieron
         self.face = None
         self.spans = []            # (t, segundos visibles)
-        self._sec = []             # muestras desde la ultima linea de estado
+        self._sec = []             # muestras desde la ultima trama de estado
 
     def run(self):
-        pending = b""
-        self.ser.reset_input_buffer()
-        if self.odr:
-            self.ser.write(f"odr={self.odr}\n".encode("ascii"))
-        first_line = True
         while self.running:
             try:
                 chunk = self.ser.read(self.ser.in_waiting or 1)
@@ -138,31 +143,55 @@ class Reader(threading.Thread):
             self._check_freeze()
             if not chunk:
                 continue
-            pending += chunk
-            *lines, pending = pending.split(b"\n")
-            for raw in lines:
-                line = raw.decode("ascii", errors="replace").strip()
-                if first_line:
-                    first_line = False   # puede venir cortada
-                    continue
-                if line.startswith(">"):
-                    self.log.write(f"respuesta del firmware: {line}")
-                    continue
-                if line.startswith("#"):
-                    self._on_status(line)
-                    continue
-                sample = parse_sample(line)
-                if sample is not None:
-                    self._on_sample(*sample)
+            for frame in self.dec.feed(chunk):
+                self._on_frame(frame)
+            if self.dec.crc_errors != self.crc_seen:
+                self.log.write(f"CRC: {self.dec.crc_errors - self.crc_seen} trama(s) con CRC mal, "
+                               "descartadas")
+                self.crc_seen = self.dec.crc_errors
+
+    def _on_frame(self, frame):
+        with self.lock:
+            events = self.chk.frame(frame)
+        for ev in events:
+            if ev.kind == "seq":
+                self.log.write(f"TRAMA PERDIDA: {ev.text}")
+            elif ev.kind == "n":
+                self.log.write(f"DESCARTE: {ev.text}")
+            elif ev.kind == "hueco":
+                ms = ev.count * (self.chk.period_us or 0) / 1000
+                self.holes.append((self.log.now(), ms))
+                self.log.write(f"HUECO: {ev.text}")
+            elif ev.kind == "ovr":
+                self.log.write(f"OVERRUN: {ev.text}", echo=False)
+            elif ev.kind == "inicio":
+                self.log.write(f"inicio: {ev.text}")
+            else:
+                self.log.write(f"{ev.kind.upper()}: {ev.text}")
+
+        if frame.ftype == vp.TYPE_SAMPLES:
+            blk = vp.parse_block(frame)
+            if blk is None:
+                return
+            self.fs = float(blk.odr) or self.fs
+            for i, (x, y, z) in enumerate(blk.samples):
+                self._on_sample(blk.n0 + i, x, y, z, blk.t0)
+        else:
+            text = frame.payload.decode("ascii", errors="replace")
+            if frame.ftype == vp.TYPE_STATUS:
+                self._on_status(text)
+            else:
+                self.log.write(f"respuesta del firmware: {text}")
 
     def _check_freeze(self):
         if self.last_sample_t is None or self.frozen_since is not None:
             return
-        if time.monotonic() - self.last_sample_t > FREEZE_S:
+        limit = max(FREEZE_S, 3 * vp.BLOCK_SAMPLES / self.fs)
+        if time.monotonic() - self.last_sample_t > limit:
             self.frozen_since = self.last_sample_t
-            self.log.write(f"CORTE: sin muestras hace {FREEZE_S} s (ultima n={self.last_n})")
+            self.log.write(f"CORTE: sin muestras hace {limit:.1f} s (ultima n={self.last_n})")
 
-    def _on_sample(self, n, x, y, z):
+    def _on_sample(self, n, x, y, z, t0_us):
         now = time.monotonic()
         if self.frozen_since is not None:
             dur = now - self.frozen_since
@@ -171,22 +200,10 @@ class Reader(threading.Thread):
             self.frozen_since = None
         self.last_sample_t = now
         if self.csv:
-            self.csv.write(f"{self.log.now():.4f},{n},{x},{y},{z}\n")
+            self.csv.write(f"{self.log.now():.4f},{t0_us},{n},{x},{y},{z}\n")
 
         gx, gy, gz = x * G_PER_LSB, y * G_PER_LSB, z * G_PER_LSB
         with self.lock:
-            if self.last_n is not None and n != self.last_n + 1:
-                if not self.status:
-                    # Al abrir el puerto llegan primero muestras viejas que
-                    # quedaron en el USB de la sesion anterior: no es un salto
-                    self.log.write(f"inicio: se descartan muestras viejas (n {self.last_n} -> {n})")
-                    self.samples.clear()
-                elif n == 0:
-                    self.log.write("n volvio a 0: el firmware se reinicio")
-                else:
-                    self.gaps += 1
-                    self.log.write(f"SALTO: n paso de {self.last_n} a {n} "
-                                   f"({n - self.last_n - 1} muestras perdidas)")
             self.last_n = n
             self.samples.append((n, gx, gy, gz))
         self.total += 1
@@ -213,7 +230,7 @@ class Reader(threading.Thread):
             self.shock = None
 
     def _on_status(self, line):
-        status = parse_status(line)
+        status = vp.parse_fields(line)
         with self.lock:
             self.status = status
             span = self.plot_span
@@ -241,7 +258,7 @@ class Reader(threading.Thread):
         text = (f"odr={status.get('odr', '?')} sps={status.get('sps', '?')} "
                 f"periodo={status.get('tmin', '?')}-{status.get('tmax', '?')} us "
                 + " ".join(f"{k}={status.get(k, '?')}" for k in COUNTERS)
-                + f" saltos={self.gaps} curva={span:.1f} s")
+                + f" perdidas={self._losses()} curva={span:.1f} s")
         if sec:
             mx = sum(s[0] for s in sec) / len(sec)
             my = sum(s[1] for s in sec) / len(sec)
@@ -260,13 +277,21 @@ class Reader(threading.Thread):
             text += " | sin muestras en este segundo"
         self.log.write(text, echo=False)
 
+    def _losses(self):
+        c = self.chk
+        return f"tramas:{c.lost_frames} micro:{c.lost_in_micro} huecos:{c.gaps} crc:{self.dec.crc_errors}"
+
     def snapshot(self):
         with self.lock:
-            return list(self.samples), dict(self.status), self.gaps
+            return list(self.samples), dict(self.status), self._losses()
 
     def close(self):
         self.running = False
         self.join(timeout=1.0)
+        try:
+            self.ser.write(b"stop\n")
+        except serial.SerialException:
+            pass
         self.ser.close()
         if self.frozen_since is not None:
             self.freezes.append(time.monotonic() - self.frozen_since)
@@ -286,13 +311,19 @@ def summarize(reader, log, window):
         log.raw(f"  sps: {min(r.sps_seen)}-{max(r.sps_seen)} (odr={odr:.0f})")
     if r.tmin_seen:
         log.raw(f"  periodo entre interrupciones: {min(r.tmin_seen)}-{max(r.tmax_seen)} us")
-    log.raw(f"  saltos de n: {r.gaps}")
+    c = r.chk
+    log.raw(f"  tramas: {r.dec.frames}, con CRC mal: {r.dec.crc_errors}, "
+            f"bytes descartados: {r.dec.skipped}")
+    log.raw(f"  tramas perdidas (USB/PC): {c.lost_frames} ({c.lost_in_transit} muestras)")
+    log.raw(f"  muestras descartadas en el micro: {c.lost_in_micro}")
+    log.raw(f"  huecos de INT1: {c.gaps} (~{c.gap_samples} muestras)"
+            + (": " + ", ".join(f"{ms / 1000:.1f} s" for _, ms in r.holes) if r.holes else ""))
     log.raw(f"  cortes de datos: {len(r.freezes)}"
             + (f" (el mas largo {max(r.freezes):.2f} s)" if r.freezes else ""))
     if r.first_counters is not None:
         log.raw("  contadores inicio -> fin: " + ", ".join(
             f"{k} {r.first_counters.get(k, '?')}->{r.last_counters.get(k, '?')}" for k in COUNTERS))
-    log.raw(f"  lineas de estado no OK: {r.statuses_bad}")
+    log.raw(f"  tramas de estado no OK: {r.statuses_bad}")
     log.raw(f"  golpes: {len(r.shocks)}" + (
         f" (pico maximo {max(abs(s[1] - 1) for s in r.shocks) + 1:.2f} g)" if r.shocks else ""))
     log.raw(f"  caras vistas: {', '.join(r.faces) if r.faces else 'ninguna'}")
@@ -317,15 +348,17 @@ def summarize(reader, log, window):
               f"mediana {steady} sps para odr={odr:.0f}")
     check("2 Caras", len(r.faces) >= 2,
           f"{len(r.faces)} de 6 ({', '.join(r.faces) or '-'})")
-    check("3 Golpe", len(r.shocks) >= 1,
-          f"{len(r.shocks)} golpe(s) detectado(s)" + (
-              ", con saltos en la sesion" if r.gaps else ", sin saltos"))
-    stall0 = (r.first_counters or {}).get("stall")
-    stall1 = r.last_counters.get("stall")
-    recovered = bool(r.freezes) and r.frozen_since is None
-    check("4 Robustez INT1", recovered and stall0 is not None and stall1 is not None and stall1 > stall0,
-          f"{len(r.freezes)} corte(s), stall {stall0}->{stall1}")
-    check("5 Saltos", r.gaps == 0, f"saltos={r.gaps}")
+    check("3 Golpe", len(r.shocks) >= 1, f"{len(r.shocks)} golpe(s) detectado(s)")
+    recovered = bool(r.holes) and r.frozen_since is None
+    check("4 Robustez INT1", recovered,
+          f"{len(r.holes)} hueco(s) informado(s) por el firmware"
+          + (" (" + ", ".join(f"{ms / 1000:.1f} s" for _, ms in r.holes) + ")" if r.holes else "")
+          + f", {len(r.freezes)} corte(s) del grafico, "
+          + ("se recupero" if r.frozen_since is None else "SIGUE CORTADO al cerrar"))
+    lost = c.lost_frames + c.lost_in_micro + r.dec.crc_errors
+    check("5 Sin perdidas", lost == 0,
+          f"tramas perdidas={c.lost_frames}, descartadas en el micro={c.lost_in_micro}, "
+          f"CRC mal={r.dec.crc_errors} (los huecos de la prueba 4 no cuentan)")
     log.raw("=" * 70)
 
 
@@ -391,7 +424,7 @@ def main():
     fig.canvas.mpl_connect("key_press_event", on_key)
 
     def update(_frame):
-        samples, status, gaps = reader.snapshot()
+        samples, status, losses = reader.snapshot()
         if not samples:
             return
         fs = float(status.get("odr", 0) or 0) or args.fs
@@ -413,7 +446,7 @@ def main():
                        f"odr={status.get('odr', '?')} sps={status.get('sps', '?')} "
                        f"periodo={status.get('tmin', '?')}-{status.get('tmax', '?')} us\n"
                        f"estado={status.get('estado', '?')} drop={status.get('drop', '?')} "
-                       f"stall={status.get('stall', '?')} saltos={gaps}"
+                       f"stall={status.get('stall', '?')} perdidas {losses}"
                        + (f" (dibujando 1 de cada {step})" if step > 1 else ""))
 
     fig.canvas.mpl_connect("close_event", lambda _e: save_png("al cerrar"))
