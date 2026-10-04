@@ -107,6 +107,29 @@ class TestWelch(unittest.TestCase):
         np.testing.assert_allclose(p, ps, rtol=1e-10, atol=1e-18)
 
 
+class TestAliasing(unittest.TestCase):
+    def test_plegar(self):
+        # Los casos medidos con el parlante del celular (fs = 795,01 Hz)
+        self.assertAlmostEqual(ve.plegar(250.0, FS), 250.0)
+        self.assertAlmostEqual(ve.plegar(500.0, FS), 295.01)
+        self.assertAlmostEqual(ve.plegar(750.0, FS), 45.01)
+        self.assertAlmostEqual(ve.plegar(1000.0, FS), 204.99)
+
+    def test_armonica_reflejada(self):
+        n = 30 * 800
+        # Tono de 250 Hz con armonicas 2 y 3 por encima de fs/2: el sensor las ve reflejadas
+        x = tono(n, 250.0, 0.011) + tono(n, ve.plegar(500.0, FS), 0.0015) + tono(n, ve.plegar(750.0, FS), 0.004)
+        f, p, _ = ve.welch(x, FS)
+        pks = ve.picos(f, p)
+        self.assertAlmostEqual(pks[0].f, 250.0, delta=0.03)
+        notas = {round(pk.f): ve.armonica_de(pk, pks[0].f, FS, f[1] - f[0]) for pk in pks[1:3]}
+        self.assertEqual(notas, {295: (2, True), 45: (3, True)})
+
+    def test_no_inventa_armonicas(self):
+        pk = ve.Pico(69.76, 11.0, 0.001, 0)
+        self.assertIsNone(ve.armonica_de(pk, 249.98, FS, FS / ve.NPERSEG))
+
+
 class TestCaptura(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -154,6 +177,25 @@ class TestCaptura(unittest.TestCase):
         pks = ve.picos(esp.f, esp.psd[2])
         self.assertAlmostEqual(pks[0].f, 300.0, delta=0.05)
         self.assertTrue(all(abs(p.f - 300.0) < 0.3 or p.db < pks[0].db - 20 for p in pks[1:]))
+
+    def test_espectrograma(self):
+        # Tono solo en la segunda mitad; hueco entre segmentos en el medio
+        n = 20 * 800
+        h = n // 2
+        x = np.concatenate((np.zeros(h), tono(h, 200.0, 0.01))) - 1.0
+        seg = np.repeat([0, 1], h)
+        segs = [{"seg": 0, "odr": 800, "periodo_us": 1e6 / FS}, {"seg": 1, "odr": 800, "periodo_us": 1e6 / FS}]
+        cap = self.escribir(x, seg=seg, segmentos=segs)
+        cap.t[h:] += 3.0                       # 3 s de hueco
+        t, f, P = ve.espectrograma(cap)
+        k = np.argmin(abs(f - 200))
+        hueco = (t > h / FS + 0.5) & (t < h / FS + 2.5)
+        self.assertTrue(np.isnan(P[:, hueco]).all())
+        antes = np.nanmedian(P[k, t < h / FS - 0.5])
+        despues = np.nanmedian(P[k, t > h / FS + 3.5])
+        # Esperado ~22 dB: ruido x+y (5,1 mg rms c/u) ~1,3e-7 g^2/Hz; tono de
+        # 10 mg rms en el ancho efectivo de Hann (1,5 bins x 3,1 Hz) ~2,1e-5 g^2/Hz
+        self.assertGreater(10 * np.log10(despues / antes), 15)
 
     def test_odr_mezclados(self):
         n = 10000

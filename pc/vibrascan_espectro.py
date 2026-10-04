@@ -175,3 +175,60 @@ def amplitud_tono(f, p, i, piso_i=0.0):
     lo, hi = max(0, i - PICO_BINS), min(len(p), i + PICO_BINS + 1)
     energia = p[lo:hi].sum() - piso_i * (hi - lo)
     return float(np.sqrt(max(energia, 0.0) * (f[1] - f[0])))
+
+
+def plegar(f, fs):
+    """Frecuencia en la que aparece f muestreando a fs (aliasing): entre 0 y fs/2."""
+    r = f % fs
+    return min(r, fs - r)
+
+
+def armonica_de(pk, f0, fs, df, kmax=6):
+    """Si pk coincide (a menos de 2 bins) con la armonica k de f0, directa o
+    reflejada por aliasing, devuelve (k, reflejada); si no, None."""
+    for k in range(2, kmax + 1):
+        fk = k * f0
+        if abs(plegar(fk, fs) - pk.f) <= 2 * df:
+            return k, fk > fs / 2
+    return None
+
+
+ESPECTROGRAMA_NPERSEG = 256     # 0,32 s a ~796 Hz: resolucion 3,1 Hz
+ESPECTROGRAMA_PASO = 64
+ESPECTROGRAMA_COLUMNAS = 4000   # en capturas largas el paso crece para no pasarse
+
+
+def espectrograma(cap, eje=3, nperseg=ESPECTROGRAMA_NPERSEG, desde=None, hasta=None):
+    """PSD en funcion del tiempo. eje 0..2 = x, y, z; 3 = suma. Devuelve
+    (t, f, P) con P de forma (F, T) en g^2/Hz; las columnas sin datos (huecos
+    entre segmentos) quedan en NaN."""
+    t0 = cap.t[0] if desde is None else desde
+    t1 = cap.t[-1] if hasta is None else hasta
+    fs_ref = 1e6 / cap.meta["periodo_us"] if cap.meta.get("periodo_us") else 800.0
+    paso = max(ESPECTROGRAMA_PASO, int(np.ceil((t1 - t0) * fs_ref / ESPECTROGRAMA_COLUMNAS)))
+    dt = paso / fs_ref
+    cols = int((t1 - t0) / dt) + 1
+    f = np.fft.rfftfreq(nperseg, 1 / fs_ref)
+    out = np.full((len(f), cols), np.nan)
+    w = hann(nperseg)
+    ejes = range(3) if eje == 3 else [eje]
+    for i0, i1 in cap.tramos():
+        j0, j1 = np.searchsorted(cap.t[i0:i1], [t0, t1 + 1e-9]) + i0
+        if j1 - j0 < nperseg:
+            continue
+        fs = _fs_segmento(cap, int(cap.seg[i0]), i0, i1)
+        g = cap.g[j0:j1]
+        starts = np.arange(0, j1 - j0 - nperseg + 1, paso)
+        acc = 0.0
+        for a in ejes:
+            fr = np.lib.stride_tricks.sliding_window_view(g[:, a], nperseg)[starts]
+            fr = fr - fr.mean(axis=1, keepdims=True)
+            p = np.abs(np.fft.rfft(fr * w, axis=1)) ** 2 / (fs * (w * w).sum())
+            p[:, 1:-1] *= 2
+            acc = acc + p
+        f_seg = np.fft.rfftfreq(nperseg, 1 / fs)
+        tc = cap.t[j0 + starts + nperseg // 2]
+        k = np.clip(((tc - t0) / dt).round().astype(int), 0, cols - 1)
+        for col, row in zip(k, acc):
+            out[:, col] = np.interp(f, f_seg, row)
+    return t0 + np.arange(cols) * dt, f, out
