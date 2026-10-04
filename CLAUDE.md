@@ -30,12 +30,12 @@ https://github.com/MatiMasat/VibraScan.git.
 |---|---|---|
 | `etapa-1` | Polling de DATA_READY a 100 Hz, texto por USB CDC | Aprobada |
 | `etapa-2` | Interrupción DATA_READY (INT1 → PB0, EXTI0), I2C 400 kHz, hasta 800 Hz | Aprobada el 2026-10-03 (automática y manual) |
-| rama `etapa-3` | Buffer por bloques y trama binaria con checksum | **En curso** |
+| `etapa-3` | Bloques de 32 muestras y trama binaria con CRC-16, `start`/`stop`, huecos con `t0` | Aprobada el 2026-10-04 (automática 10 min y manual) |
+| (sin rama) | 4: captura a archivo y gráfico en tiempo | Próxima |
 
-Pendiente detectado en la etapa 2 para tener en cuenta en la 3: `n` cuenta
-lecturas del micro, no tiempo del sensor; si INT1 se corta, `n` sigue
-consecutivo y el hueco solo se ve en `ovr`. Además, al abrir el puerto llegan
-primero muestras viejas que quedaron en el USB.
+Desde la etapa 3 el enlace es binario (ver README y `pc/vibrascan_proto.py`):
+un monitor serie ya no sirve para mirar los datos; usar
+`python vibrascan_proto.py --port COM8 --dump`.
 
 ## Cómo trabajar con el usuario
 
@@ -75,8 +75,8 @@ hay que ubicar las equivalentes y, si cambian, anotarlas acá.
   "/f/Sofwares/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe" -c port=SWD mode=UR -w "<.elf>" -v -rst
   ```
   Para leer RAM o registros sin resetear se usa `mode=HOTPLUG`.
-- **Probar** (con el USB conectado), desde `pc/`: `etapa2_prueba.py` y
-  `monitor_vivo.py`; los argumentos están en el README. En la PC de escritorio
+- **Probar** (con el USB conectado), desde `pc/`: `etapa3_prueba.py` y
+  `monitor_vivo.py` (y `python -m unittest test_vibrascan_proto`, sin placa); los argumentos están en el README. En la PC de escritorio
   la Black Pill aparece como **COM8**. Se puede ver con `--list`.
 - Python 3.9, con `pyserial` y `matplotlib` (`pc/requirements.txt`). Las
   capturas se guardan en `pc/capturas/` (ignoradas en `.gitignore`).
@@ -89,8 +89,11 @@ hay que ubicar las equivalentes y, si cambian, anotarlas acá.
   SPI (etapa 6) solo cambia esas funciones.
 - `usb_link.c` es lo único que conoce el transporte USB CDC.
 - Comentarios y nombres en español, sin tildes en el código C.
-- Protocolo de texto: `n,x,y,z` = muestra; `# ...` = estado (1 por segundo);
-  `> ...` = respuesta a un comando de la PC.
+- Protocolo binario (etapa 3): tramas `A5 5A` + tipo + largo + seq + contenido
+  + CRC-16, definido igual en `Core/Src/trama.c` y `pc/vibrascan_proto.py`.
+  Si cambia, cambiar los dos y correr `test_vibrascan_proto`.
+- En el firmware, al comparar ticks que escribe una interrupción, restar con
+  signo o leer la hora de nuevo (un bug de la etapa 3 salió de ahí).
 - El `.ioc` se editó a mano. **No usar "Generate Code"** sin crear antes una
   rama o un commit: los archivos de `USB_DEVICE/` no tienen bloques USER CODE
   y se sobrescriben (con git se recuperan con `git checkout -- USB_DEVICE`).
