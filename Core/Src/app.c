@@ -574,6 +574,21 @@ static void update_rates(void)
   st_tmax_us = pmax / cyc_per_us;
 }
 
+/* Empieza una ventana nueva de 1 s para int1, sps, tmin y tmax (con start y
+   al cambiar el ODR: si no, el primer segundo mezclaria periodos viejos). */
+static void restart_rates(void)
+{
+  uint32_t primask = __get_PRIMASK();
+
+  __disable_irq();
+  int1_edges_prev = n_int1_edges;
+  n_samples_prev = n_samples;
+  period_min_cyc = UINT32_MAX;
+  period_max_cyc = 0;
+  __set_PRIMASK(primask);
+  t_status = HAL_GetTick();
+}
+
 static void send_status(void)
 {
   if (sensor_status == ADXL345_OK)
@@ -625,7 +640,7 @@ static void cmd_start(void)
   streaming = true;
   send_text(TRAMA_RESPUESTA, "start ok");
   send_status();
-  t_status = HAL_GetTick();
+  restart_rates();                     /* el proximo estado cubre 1 s desde start */
 }
 
 /* "odr=<Hz>": reconfigura el sensor con otro ODR (100 a 800 Hz). */
@@ -640,6 +655,10 @@ static void cmd_odr(unsigned long hz)
       have_last = false;               /* el cambio no es un hueco */
       app_rate = r;
       sensor_connect();
+      /* Todavia no hay un segundo completo con el ODR nuevo: hasta el
+         proximo estado se informa 0 en vez de valores del ODR viejo. */
+      restart_rates();
+      st_int1 = st_sps = st_tmin_us = st_tmax_us = 0;
       send_text(TRAMA_RESPUESTA, "odr=%lu ok", hz);
       return;
     }
