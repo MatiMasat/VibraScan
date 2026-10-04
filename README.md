@@ -5,7 +5,34 @@ con un ADXL345 sobre una Black Pill (STM32F411CEU6). Se construye por etapas;
 cada una se prueba sola antes de sumar la siguiente. Cada etapa aprobada tiene
 un tag en git (`etapa-1`, `etapa-2`, ...).
 
-## Etapa 4 - captura a archivo y gráfico en tiempo (en curso)
+## Etapa 4 - captura a archivo y gráfico en tiempo (aprobada, tag `etapa-4`)
+
+Aprobada el 2026-10-04 en la placa:
+
+- **Reposo, 30 min a 800 Hz y ±4 g** (`captura_20261004_024609`): 1 433 088
+  muestras en un solo segmento, 0 pérdidas, contadores sin cambios. Deriva
+  de la media por minuto 1,0/1,1/1,0 mg (x/y/z; un leve asentamiento en los
+  primeros ~7 min, probablemente térmico), ruido 5,3/6,1/6,5 mg rms sin
+  ningún minuto fuera de ±20 %, |a| = 1,017 g. Periodo por regresión
+  1256,03 µs (796,2 Hz): el oscilador del sensor cambió 0,16 % respecto de
+  la etapa 3 (otra ubicación/temperatura), así que el análisis debe usar la
+  tasa medida de cada captura y no 800 Hz.
+- **Golpes, 30 s a ±16 g** (`captura_20261004_032553`): 5 de 5, separados
+  1,8–2,1 s, picos de 1,9–2,5 g, 14–19 ms sobre el umbral, ancho a media
+  altura 3,8–7,5 ms, vuelta al reposo en 31–134 ms. Después de cada golpe la
+  mesa/protoboard oscila ~0,5 s (se va a ver en la FFT de la etapa 5).
+- `rango=` en los cuatro valores, descarte de asentamiento verificado,
+  regresión de la etapa 3 a 100/400/800 Hz, y monitor que retoma solo al
+  desconectar y reconectar el USB (la captura queda con 2 segmentos).
+
+Un primer intento de golpes falló "Golpes cortos" (57–138 ms): eran golpes
+más fuertes (hasta 15,2 g, a 0,8 g del tope de ±16 g) con **rebote** (un
+segundo impacto ~80 ms después). El detector junta impactos a menos de
+0,2 s, así que la duración medía el rebote; cada impacto por separado medía
+~5 ms. Si hace falta caracterizar golpes con rebote, la medida adecuada es el
+ancho del pico a media altura. A 800 Hz un impacto de ~5 ms son 4 muestras:
+el pico real puede ser mayor que el muestreado (la etapa 6, a 3200 Hz, lo
+resuelve mejor).
 
 Sobre la etapa 3. Casi todo es de PC; en el firmware solo se agregó el
 comando `rango=` y el descarte de asentamiento.
@@ -270,7 +297,7 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
 |---|---|---|
 | 2 | Muestreo por interrupción DATA_READY (INT1 a un pin EXTI) y ODR más alto | muestras/s = ODR, sin saltos (aprobada) |
 | 3 | Buffer por bloques y trama binaria con checksum | minutos sin pérdidas (aprobada) |
-| 4 | Captura a archivo y gráfico en tiempo | reposo estable, golpe visible (en curso) |
+| 4 | Captura a archivo y gráfico en tiempo | reposo estable, golpe visible (aprobada) |
 | 5 | Preproceso y FFT/PSD en Python | pico en la frecuencia de una fuente conocida |
 | 6 | SPI a 3200 Hz (con el FIFO del ADXL345) | igual que 2 y 3 |
 | 7 | FFT y filtro adaptativo (LMS) en el micro | mismo resultado que en Python |

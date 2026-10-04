@@ -38,7 +38,8 @@ https://github.com/MatiMasat/VibraScan.git.
 | `etapa-1` | Polling de DATA_READY a 100 Hz, texto por USB CDC | Aprobada |
 | `etapa-2` | Interrupción DATA_READY (INT1 → PB0, EXTI0), I2C 400 kHz, hasta 800 Hz | Aprobada el 2026-10-03 (automática y manual) |
 | `etapa-3` | Bloques de 32 muestras y trama binaria con CRC-16, `start`/`stop`, huecos con `t0` | Aprobada el 2026-10-04 (automática 10 min y manual) |
-| (sin rama) | 4: captura a archivo y gráfico en tiempo | Próxima |
+| `etapa-4` | Captura a archivo (CSV de cuentas + JSON, segmentos, reconexión), visor con envolvente, `rango=`, descarte de asentamiento | Aprobada el 2026-10-04 (reposo 30 min, golpes, manual) |
+| (sin rama) | 5: preproceso y FFT/PSD en Python | Próxima |
 
 Desde la etapa 3 el enlace es binario (ver README y `pc/vibrascan_proto.py`):
 un monitor serie ya no sirve para mirar los datos; usar
@@ -82,10 +83,13 @@ hay que ubicar las equivalentes y, si cambian, anotarlas acá.
   "/f/Sofwares/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe" -c port=SWD mode=UR -w "<.elf>" -v -rst
   ```
   Para leer RAM o registros sin resetear se usa `mode=HOTPLUG`.
-- **Probar** (con el USB conectado), desde `pc/`: `etapa3_prueba.py` y
-  `monitor_vivo.py` (y `python -m unittest test_vibrascan_proto`, sin placa); los argumentos están en el README. En la PC de escritorio
-  la Black Pill aparece como **COM8**. Se puede ver con `--list`.
-- Python 3.9, con `pyserial` y `matplotlib` (`pc/requirements.txt`). Las
+- **Probar** (con el USB conectado), desde `pc/`: `etapa3_prueba.py`,
+  `captura.py` + `etapa4_prueba.py`, `monitor_vivo.py` y `ver_captura.py`
+  (sin placa: `python -m unittest test_vibrascan_proto test_vibrascan_archivo`;
+  `ver_captura.py --png` sirve para mirar capturas sin abrir ventana). Los
+  argumentos están en el README. En la PC de escritorio la Black Pill aparece
+  como **COM8**. Se puede ver con `--list`.
+- Python 3.9, con `pyserial`, `matplotlib` y `numpy` (`pc/requirements.txt`). Las
   capturas se guardan en `pc/capturas/` (ignoradas en `.gitignore`).
 
 ## Convenciones del código
