@@ -29,6 +29,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 
 import matplotlib.pyplot as plt
 import serial
@@ -288,11 +289,13 @@ class Reader(threading.Thread):
     def close(self):
         self.running = False
         self.join(timeout=1.0)
+        # Si el USB se desconecto, el puerto ya no existe y Windows puede
+        # tirar cualquier error al usarlo: no debe impedir el resumen
         try:
             self.ser.write(b"stop\n")
-        except serial.SerialException:
-            pass
-        self.ser.close()
+            self.ser.close()
+        except (serial.SerialException, OSError) as e:
+            self.log.write(f"al cerrar el puerto: {e}")
         if self.frozen_since is not None:
             self.freezes.append(time.monotonic() - self.frozen_since)
         if self.csv:
@@ -453,7 +456,10 @@ def main():
     anim = FuncAnimation(fig, update, interval=50, cache_frame_data=False)  # noqa: F841
     plt.show()
     reader.close()
-    summarize(reader, log, args.window)
+    try:
+        summarize(reader, log, args.window)
+    except Exception:
+        log.raw("ERROR armando el resumen:\n" + traceback.format_exc())
     log.raw(f"Registro: {base}.log")
     log.close()
     return 0
