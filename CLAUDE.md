@@ -1,6 +1,96 @@
-# VibraScan_v2 (etapa 2, proyecto activo)
+# VibraScan — contexto para Claude
 
-El contexto completo del proyecto y la forma de trabajo están en el CLAUDE.md
-de la etapa 1:
+Adquisición de vibraciones con un ADXL345 sobre una Black Pill (STM32F411CEU6),
+para la beca Vibra-Scan. Se construye por etapas: cada etapa se prueba sola
+(prueba automática en Python + pruebas manuales del usuario) antes de pasar
+a la siguiente.
 
-@../VibraScan/CLAUDE.md
+El detalle técnico de la etapa actual (conexiones, protocolo, comandos,
+chequeos de aprobación, próximas etapas) está en el `README.md`. Leerlo antes
+de tocar código; no repetirlo acá.
+
+## Repositorio y etapas
+
+Todo vive en un solo repo git:
+`F:\Users\Usuario\Desktop\UTN\Beca de servicio\VibraScan\repo`, con remoto
+https://github.com/MatiMasat/VibraScan.git.
+
+- `main` tiene solo etapas aprobadas. Cada etapa aprobada lleva un tag anotado
+  (`etapa-1`, `etapa-2`, ...): `git checkout etapa-1` vuelve a esa versión.
+- Una etapa nueva se trabaja en la rama `etapa-N`, con un commit por cada paso
+  que funciona. Al aprobarse se mergea a `main`, se pone el tag y se hace push
+  (`git push --follow-tags`).
+- No se crean más carpetas por etapa (`VibraScan_v3`, etc.). Las carpetas
+  `VibraScan/` y `VibraScan_v2/` que están al lado de `repo/` son copias
+  viejas; no se usan.
+- El proyecto de Eclipse se sigue llamando `VibraScan_v2` (salida
+  `Debug/VibraScan_v2.elf`).
+
+| Tag | Etapa | Estado |
+|---|---|---|
+| `etapa-1` | Polling de DATA_READY a 100 Hz, texto por USB CDC | Aprobada |
+| `etapa-2` | Interrupción DATA_READY (INT1 → PB0, EXTI0), I2C 400 kHz, hasta 800 Hz | Aprobada el 2026-10-03 (automática y manual) |
+| rama `etapa-3` | Buffer por bloques y trama binaria con checksum | **En curso** |
+
+Pendiente detectado en la etapa 2 para tener en cuenta en la 3: `n` cuenta
+lecturas del micro, no tiempo del sensor; si INT1 se corta, `n` sigue
+consecutivo y el hueco solo se ve en `ovr`. Además, al abrir el puerto llegan
+primero muestras viejas que quedaron en el USB.
+
+## Cómo trabajar con el usuario
+
+- **Consultar antes de modificar código.** Proponer el cambio, explicarlo y
+  esperar el OK.
+- En cada cambio, decir qué se hizo, qué se hará después y **qué pruebas debe
+  hacer el usuario** (por ejemplo, qué se tiene que ver en el gráfico).
+- Las pruebas manuales se hacen con `monitor_vivo.py`, que deja un `.log` con
+  eventos y resumen en `pc/capturas/`: leerlo para ver cómo fueron, además de
+  lo que cuente el usuario.
+- **Nunca ST-Link y USB conectados a la vez.** Unir los dos 3,3 V hizo fallar
+  uno de los USB. El usuario conecta uno solo por vez, y Claude le avisa con
+  claridad cuándo cambiar:
+  - ST-Link (SWDIO, SWCLK, GND; sin 3,3 V) → para grabar y leer memoria.
+  - USB de la Black Pill → para las pruebas por el puerto COM.
+- Respuestas en español.
+
+## Compilar, grabar y probar
+
+Las rutas son de la PC de escritorio. En otra máquina (por ejemplo la notebook)
+hay que ubicar las equivalentes y, si cambian, anotarlas acá.
+
+- **Compilar sin abrir el IDE** (STM32CubeIDE 2.1.1, build headless, con un
+  workspace temporal en el scratchpad):
+  ```
+  "C:/Users/matim/STM32CubeIDE/STM32CubeIDE_2.1.1/STM32CubeIDE/stm32cubeidec.exe" \
+    --launcher.suppressErrors -nosplash \
+    -application org.eclipse.cdt.managedbuilder.core.headlessbuild \
+    -data "<scratchpad>/ws_build" \
+    -import "<ruta del repo>" -build "VibraScan_v2/Debug"
+  ```
+  La primera vez va `-import`; después alcanza con `-build`, o `-cleanBuild`
+  para una compilación limpia. Salida: `Debug/VibraScan_v2.elf`. Tiene que
+  compilar sin warnings.
+- **Grabar** (con el ST-Link conectado):
+  ```
+  "/f/Sofwares/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe" -c port=SWD mode=UR -w "<.elf>" -v -rst
+  ```
+  Para leer RAM o registros sin resetear se usa `mode=HOTPLUG`.
+- **Probar** (con el USB conectado), desde `pc/`: `etapa2_prueba.py` y
+  `monitor_vivo.py`; los argumentos están en el README. En la PC de escritorio
+  la Black Pill aparece como **COM8**. Se puede ver con `--list`.
+- Python 3.9, con `pyserial` y `matplotlib` (`pc/requirements.txt`). Las
+  capturas se guardan en `pc/capturas/` (ignoradas en `.gitignore`).
+
+## Convenciones del código
+
+- `main.c` lo genera CubeMX y solo llama a `app_init()` / `app_loop()`. La lógica
+  de la etapa va en `app.c`.
+- `adxl345.c` no conoce HAL ni el bus: recibe funciones read/write. El paso a
+  SPI (etapa 6) solo cambia esas funciones.
+- `usb_link.c` es lo único que conoce el transporte USB CDC.
+- Comentarios y nombres en español, sin tildes en el código C.
+- Protocolo de texto: `n,x,y,z` = muestra; `# ...` = estado (1 por segundo);
+  `> ...` = respuesta a un comando de la PC.
+- El `.ioc` se editó a mano. **No usar "Generate Code"** sin crear antes una
+  rama o un commit: los archivos de `USB_DEVICE/` no tienen bloques USER CODE
+  y se sobrescriben (con git se recuperan con `git checkout -- USB_DEVICE`).

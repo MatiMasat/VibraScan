@@ -10,9 +10,13 @@ Copia de la etapa 1 (proyecto `VibraScan`, que queda como referencia).
 
 Aprobada el 2026-10-02 en la placa: `etapa2_prueba.py` sin fallas a 100, 400
 y 800 Hz (20 s cada uno) y 60 s a 800 Hz (47 686 muestras, 0 saltos, todos los
-contadores en 0, periodo entre flancos de 1257 a 1258 µs). Verificado a mano
-con `monitor_vivo.py`: reposo, ±1 g por cara, golpe visible, y recuperación
-sola al soltar y reconectar el cable INT1 (sube `stall`).
+contadores en 0, periodo entre flancos de 1257 a 1258 µs). Pruebas manuales
+con `monitor_vivo.py` aprobadas el 2026-10-03 (sesión de 196 s, 151 706
+muestras, 0 saltos): curva de 10 s completa, ±1 g en cuatro caras, 26 golpes
+de hasta 2,2 g sin cortes del gráfico, y recuperación sola las dos veces que se
+soltó el cable INT1 (una por el flanco al reconectar, otra por la red de
+seguridad: `stall` 0 -> 1). Mientras INT1 está suelto `n` no avanza: el hueco
+solo queda marcado por `ovr`.
 
 El micro busca el ADXL345 por I2C (400 kHz), verifica el DEVID y lo configura
 (800 Hz, ±4 g, FULL_RES) con DATA_READY saliendo por INT1 -> PB0. Cada flanco
@@ -91,6 +95,12 @@ Para ver los ejes en tiempo real mientras se mueve el sensor:
 A 800 Hz el gráfico dibuja 1 de cada k muestras si la ventana tiene más de
 4000 (lo indica el título); los datos que llegan no se pierden.
 
+Cada sesión del monitor queda en `pc/capturas/`: `monitor_<fecha>.log` (una
+línea por segundo, eventos SALTO / CORTE / GOLPE / CARA / CONTADOR y, al
+cerrar, un resumen con el chequeo de las pruebas manuales), `.csv` con todas
+las muestras crudas y `_N.png` con el gráfico (tecla `g` y al cerrar). Las
+muestras viejas que llegan al abrir el puerto no se cuentan como saltos.
+
 Prueba manual extra: apoyar el sensor sobre cada cara; el eje vertical debe
 dar cerca de +1 g o -1 g y los otros dos cerca de 0.
 
@@ -111,7 +121,7 @@ muy rápido = falló la inicialización de un periférico.
 
 | # | Etapa | Se aprueba cuando |
 |---|---|---|
-| 2 | Muestreo por interrupción DATA_READY (INT1 a un pin EXTI) y ODR más alto | muestras/s = ODR, sin saltos |
+| 2 | Muestreo por interrupción DATA_READY (INT1 a un pin EXTI) y ODR más alto | muestras/s = ODR, sin saltos (aprobada) |
 | 3 | Buffer por bloques y trama binaria con checksum | minutos sin pérdidas |
 | 4 | Captura a archivo y gráfico en tiempo | reposo estable, golpe visible |
 | 5 | Preproceso y FFT/PSD en Python | pico en la frecuencia de una fuente conocida |
