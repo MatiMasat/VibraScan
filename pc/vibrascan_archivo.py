@@ -108,6 +108,7 @@ class Golpe:
     dur_ms: float       # del primer al ultimo cruce del umbral
     vuelta_ms: float    # del ultimo cruce hasta quedar firme en reposo (None si no volvio)
     saturado: bool
+    t_pico_s: float = None  # instante del pico
 
 
 def golpes(cap, umbral_g=GOLPE_UMBRAL_G):
@@ -129,7 +130,8 @@ def golpes(cap, umbral_g=GOLPE_UMBRAL_G):
         k = i0 + int(np.argmax(dev[i0:i1 + 1]))
         out.append(Golpe(float(cap.t[i0]), float(mod[k]), (cap.t[i1] - cap.t[i0]) * 1000,
                          _vuelta_ms(cap.t, dev, i1),
-                         bool(sat[i0:i1 + 1].any()) if sat is not None else False))
+                         bool(sat[i0:i1 + 1].any()) if sat is not None else False,
+                         float(cap.t[k])))
     return out
 
 

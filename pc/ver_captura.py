@@ -105,7 +105,7 @@ def main():
         for ax in axs:
             ax.axvspan(cap.t[a1 - 1], cap.t[b0], color="0.6", alpha=0.35, linewidth=0)
     for gol in gs:
-        axs[3].annotate("", xy=(gol.t_s, gol.pico_g), xytext=(gol.t_s, gol.pico_g + 0.3),
+        axs[3].annotate("", xy=(gol.t_pico_s, gol.pico_g), xytext=(gol.t_pico_s, gol.pico_g + 0.3),
                         arrowprops={"arrowstyle": "->", "color": "red"})
 
     m = cap.meta
