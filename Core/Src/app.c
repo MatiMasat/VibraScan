@@ -160,6 +160,7 @@ static uint32_t n_drop;
 static uint32_t n_stall;
 static uint32_t int1_edges_prev;
 static uint32_t n_samples_prev;
+static uint32_t st_int1, st_sps, st_tmin_us, st_tmax_us;   /* ultimo segundo completo */
 
 /* Periodo entre flancos de INT1 medido con el contador de ciclos (DWT), que
    corre con el reloj del micro (cristal de 25 MHz). Min y max por segundo. */
@@ -385,7 +386,9 @@ static void check_stall(uint32_t now)
 
   if (!rx_busy &&
       (HAL_GPIO_ReadPin(ADXL_INT1_GPIO_Port, ADXL_INT1_Pin) == GPIO_PIN_SET) &&
-      ((now - t_last_read) > stall_ms))
+      /* con signo: la interrupcion puede haber escrito t_last_read despues
+         de que app_loop leyo now, y la resta sin signo daria la vuelta */
+      ((int32_t)(now - t_last_read) > (int32_t)stall_ms))
   {
     n_stall++;
     t_last_read = now;                 /* un relanzamiento por periodo de espera */
@@ -542,15 +545,18 @@ static const char *status_text(adxl345_status_t st)
   }
 }
 
-static void send_status(void)
+/* Cierra el segundo: int1, sps, tmin y tmax de la trama de estado son los
+   del ultimo segundo completo. Se llama cada segundo aunque no se este
+   mandando, asi el estado que sale con start no acumula desde el arranque. */
+static void update_rates(void)
 {
   uint32_t edges = n_int1_edges;
   uint32_t samples = n_samples;
-  uint32_t int1 = edges - int1_edges_prev;
-  uint32_t sps = samples - n_samples_prev;
   uint32_t pmin, pmax;
   uint32_t primask = __get_PRIMASK();
 
+  st_int1 = edges - int1_edges_prev;
+  st_sps = samples - n_samples_prev;
   int1_edges_prev = edges;
   n_samples_prev = samples;
 
@@ -564,18 +570,23 @@ static void send_status(void)
   {
     pmin = 0;                          /* no hubo dos flancos en este segundo */
   }
+  st_tmin_us = pmin / cyc_per_us;
+  st_tmax_us = pmax / cyc_per_us;
+}
 
+static void send_status(void)
+{
   if (sensor_status == ADXL345_OK)
   {
     send_text(TRAMA_ESTADO,
               "estado=OK etapa=%d addr=0x%02X devid=0x%02X odr=%lu n=%lu ovr=%lu i2c_err=%lu drop=%lu stall=%lu bfull=%lu hueco=%lu int1=%lu sps=%lu tmin=%lu tmax=%lu",
               APP_STAGE, (unsigned)(i2c_ctx.addr >> 1), sensor.devid,
               (unsigned long)adxl345_rate_hz(app_rate),
-              (unsigned long)samples, (unsigned long)n_overrun,
+              (unsigned long)n_samples, (unsigned long)n_overrun,
               (unsigned long)n_i2c_err, (unsigned long)n_drop,
               (unsigned long)n_stall, (unsigned long)n_buf_full, (unsigned long)n_gap,
-              (unsigned long)int1, (unsigned long)sps,
-              (unsigned long)(pmin / cyc_per_us), (unsigned long)(pmax / cyc_per_us));
+              (unsigned long)st_int1, (unsigned long)st_sps,
+              (unsigned long)st_tmin_us, (unsigned long)st_tmax_us);
   }
   else
   {
@@ -716,10 +727,15 @@ void app_loop(void)
   process_commands();
   send_samples();
 
+  /* Hora de nuevo: start pone t_status en el tick actual, que puede ser
+     posterior al now del principio de la vuelta (la resta daria la vuelta
+     y saldria un estado de mas). */
+  now = HAL_GetTick();
   if ((now - t_status) >= STATUS_PERIOD_MS)
   {
     t_status = now;
     (void)clock_us();                  /* el reloj en us no se atrasa aunque no haya flancos */
+    update_rates();
     if (streaming)
     {
       send_status();
