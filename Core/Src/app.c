@@ -1,6 +1,6 @@
 /**
   * @file    app.c
-  * @brief   VibraScan - Etapa 3: buffer por bloques y trama binaria con checksum.
+  * @brief   VibraScan - Etapa 4: etapa 3 (bloques y trama binaria con CRC) + comando rango=.
   *
   * Que hace:
   *   - Busca el sensor (0x53 y 0x1D), verifica DEVID y lo configura con
@@ -32,6 +32,9 @@
   *            USB no llegan a llevarse los datos)
   *   hueco    veces que pasaron mas de 1,5 periodos entre dos muestras
   *
+  * Informativo: asent = muestras descartadas tras configurar el sensor
+  * (SETTLE_SAMPLES cada vez: al arrancar, con odr=, rango= o al reconectar).
+  *
   * Campos informativos (del ultimo segundo):
   *   int1     flancos de subida en PB0 (= odr)
   *   sps      muestras leidas (= odr)
@@ -42,6 +45,10 @@
   *   start     vacia el buffer, reinicia seq y empieza a mandar
   *   stop      deja de mandar (el sensor sigue midiendo)
   *   odr=<Hz>  cambia el ODR: 100, 200, 400 u 800 (por defecto 800)
+  *   rango=<g> cambia el rango: 2, 4, 8 o 16 g (por defecto 4). En FULL_RES la
+  *             escala es 3,9 mg/cuenta en cualquier rango; cambia el tope.
+  *             Si se manda mientras se transmite, la reconfiguracion deja un
+  *             hueco real de unos ms y se informa como tal.
   *
   * LED (PC13): parpadeo lento = midiendo, parpadeo rapido = sensor no responde.
   */
@@ -58,10 +65,10 @@
 #include "usb_link.h"
 
 /* ---- Configuracion de la etapa ------------------------------------------ */
-#define APP_STAGE             3
+#define APP_STAGE             4
 #define APP_RATE_DEFAULT      ADXL345_RATE_800HZ   /* se cambia con el comando odr= */
 #define APP_RATE_MAX          ADXL345_RATE_800HZ   /* 1600 y 3200 Hz piden SPI (etapa 6) */
-#define APP_RANGE             ADXL345_RANGE_4G
+#define APP_RANGE_DEFAULT     ADXL345_RANGE_4G     /* se cambia con el comando rango= */
 
 #define I2C_TIMEOUT_MS        10U
 #define STATUS_PERIOD_MS      1000U
@@ -72,7 +79,8 @@
 #define BLOCK_SAMPLES         32U     /* muestras por bloque = por trama (40 ms a 800 Hz) */
 #define BLOCK_COUNT           32U     /* bloques; potencia de 2 (1024 muestras, 1,3 s a 800 Hz) */
 #define TX_BATCH_SIZE         512U    /* bytes por envio USB (<= USB_LINK_MAX_WRITE): 2 tramas */
-#define TEXT_MAX              200U    /* texto de una trama de estado o respuesta */
+#define TEXT_MAX              256U    /* texto de estado o respuesta (el estado ocupa hasta 249) */
+#define SETTLE_SAMPLES        2U      /* muestras descartadas tras configurar el sensor */
 
 _Static_assert(TX_BATCH_SIZE <= USB_LINK_MAX_WRITE, "TX_BATCH_SIZE mayor que lo que acepta usb_link");
 _Static_assert((BLOCK_COUNT & (BLOCK_COUNT - 1U)) == 0U, "BLOCK_COUNT debe ser potencia de 2");
@@ -121,12 +129,14 @@ _Static_assert(offsetof(block_t, t0) == 4U && offsetof(block_t, odr) == 8U &&
                offsetof(block_t, s) == BLOCK_HEADER_LEN, "block_t no coincide con la trama");
 _Static_assert(sizeof(block_t) == BLOCK_HEADER_LEN + 6U * BLOCK_SAMPLES, "block_t tiene relleno");
 _Static_assert(2U * (sizeof(block_t) + TRAMA_EXTRA) <= TX_BATCH_SIZE, "no entran 2 tramas por envio");
+_Static_assert(TEXT_MAX + TRAMA_EXTRA <= USB_LINK_MAX_WRITE, "la trama de texto no entra en un envio");
 
 /* ---- Estado --------------------------------------------------------------- */
 static i2c_ctx_t        i2c_ctx = { &hi2c1, 0 };
 static adxl345_t        sensor;
 static adxl345_status_t sensor_status = ADXL345_ERR_BUS;
 static adxl345_rate_t   app_rate = APP_RATE_DEFAULT;
+static adxl345_range_t  app_range = APP_RANGE_DEFAULT;
 
 /* Compartido con las interrupciones (EXTI e I2C) */
 static volatile bool     sampling;        /* true = las interrupciones pueden leer */
@@ -154,6 +164,8 @@ static volatile uint32_t n_overrun;
 static volatile uint32_t n_i2c_err;
 static volatile uint32_t n_buf_full;
 static volatile uint32_t n_gap;
+static volatile uint32_t n_settle;        /* muestras descartadas por asentamiento */
+static volatile uint32_t settle_skip;     /* cuantas faltan descartar */
 static volatile uint32_t n_int1_edges;
 static volatile uint32_t consecutive_err;
 static uint32_t n_drop;
@@ -357,8 +369,20 @@ void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
   have_last = true;
   last_t_us = t;
 
-  store_sample(&s, t, (src & ADXL345_INT_OVERRUN) != 0U);
-  n_samples++;
+  /* Recien configurado, el sensor da la primera muestra desviada (~0,12 g,
+     medido en la etapa 4): se descartan SETTLE_SAMPLES. No suman a n (para
+     la PC no existieron) pero si cuentan como ultima muestra, asi la
+     siguiente no parece un hueco. */
+  if (settle_skip > 0U)
+  {
+    settle_skip--;
+    n_settle++;
+  }
+  else
+  {
+    store_sample(&s, t, (src & ADXL345_INT_OVERRUN) != 0U);
+    n_samples++;
+  }
 
   consecutive_err = 0;
   t_last_read = HAL_GetTick();
@@ -424,6 +448,7 @@ static void start_sampling(void)
 
   blk_odr = (uint16_t)adxl345_rate_hz(app_rate);
   gap_limit_us = 1500000U / blk_odr;
+  settle_skip = SETTLE_SAMPLES;        /* el sensor se acaba de configurar */
 
   consecutive_err = 0;
   bus_lost = false;
@@ -440,7 +465,7 @@ static void sensor_connect(void)
   for (uint32_t i = 0; i < sizeof(ADDR_CANDIDATES); i++)
   {
     i2c_ctx.addr = (uint16_t)(ADDR_CANDIDATES[i] << 1);
-    sensor_status = adxl345_init(&sensor, &bus, app_rate, APP_RANGE);
+    sensor_status = adxl345_init(&sensor, &bus, app_rate, app_range);
     if (sensor_status == ADXL345_OK)
     {
       sensor_status = adxl345_enable_data_ready_int1(&sensor);
@@ -511,12 +536,14 @@ static void send_samples(void)
   }
 }
 
-/* Manda una trama de texto (estado o respuesta). */
+/* Manda una trama de texto (estado o respuesta). Solo se llama desde
+   app_loop (nunca desde una interrupcion): los buffers pueden ser static y
+   no ocupan pila. */
 static void send_text(uint8_t tipo, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void send_text(uint8_t tipo, const char *fmt, ...)
 {
-  char text[TEXT_MAX];
-  uint8_t frame[TEXT_MAX + TRAMA_EXTRA];
+  static char text[TEXT_MAX];
+  static uint8_t frame[TEXT_MAX + TRAMA_EXTRA];
   va_list ap;
   int n;
 
@@ -594,12 +621,13 @@ static void send_status(void)
   if (sensor_status == ADXL345_OK)
   {
     send_text(TRAMA_ESTADO,
-              "estado=OK etapa=%d addr=0x%02X devid=0x%02X odr=%lu n=%lu ovr=%lu i2c_err=%lu drop=%lu stall=%lu bfull=%lu hueco=%lu int1=%lu sps=%lu tmin=%lu tmax=%lu",
+              "estado=OK etapa=%d addr=0x%02X devid=0x%02X odr=%lu rango=%u n=%lu ovr=%lu i2c_err=%lu drop=%lu stall=%lu bfull=%lu hueco=%lu asent=%lu int1=%lu sps=%lu tmin=%lu tmax=%lu",
               APP_STAGE, (unsigned)(i2c_ctx.addr >> 1), sensor.devid,
-              (unsigned long)adxl345_rate_hz(app_rate),
+              (unsigned long)adxl345_rate_hz(app_rate), 2U << (unsigned)app_range,
               (unsigned long)n_samples, (unsigned long)n_overrun,
               (unsigned long)n_i2c_err, (unsigned long)n_drop,
               (unsigned long)n_stall, (unsigned long)n_buf_full, (unsigned long)n_gap,
+              (unsigned long)n_settle,
               (unsigned long)st_int1, (unsigned long)st_sps,
               (unsigned long)st_tmin_us, (unsigned long)st_tmax_us);
   }
@@ -666,6 +694,27 @@ static void cmd_odr(unsigned long hz)
   send_text(TRAMA_RESPUESTA, "odr=%lu no_valido (100, 200, 400 u 800)", hz);
 }
 
+/* "rango=<g>": reconfigura el sensor con otro rango (2, 4, 8 o 16 g). A
+   diferencia de odr=, no se olvida la muestra anterior: el periodo no cambia
+   y las muestras que no se leyeron durante la reconfiguracion faltan de
+   verdad, asi que se informan como hueco. */
+static void cmd_rango(unsigned long g)
+{
+  for (adxl345_range_t r = ADXL345_RANGE_2G; r <= ADXL345_RANGE_16G; r++)
+  {
+    if ((2UL << (unsigned)r) == g)
+    {
+      (void)pause_sampling();
+      close_block();                   /* el bloque en curso queda con el rango viejo */
+      app_range = r;
+      sensor_connect();
+      send_text(TRAMA_RESPUESTA, "rango=%lu ok", g);
+      return;
+    }
+  }
+  send_text(TRAMA_RESPUESTA, "rango=%lu no_valido (2, 4, 8 o 16)", g);
+}
+
 static void process_commands(void)
 {
   char cmd[24];
@@ -684,6 +733,10 @@ static void process_commands(void)
   {
     streaming = false;
     send_text(TRAMA_RESPUESTA, "stop ok");
+  }
+  else if (sscanf(cmd, "rango=%lu", &hz) == 1)
+  {
+    cmd_rango(hz);
   }
   else if (sscanf(cmd, "odr=%lu", &hz) == 1)
   {

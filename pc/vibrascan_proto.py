@@ -289,8 +289,9 @@ class Checker:
 
 # ---- Herramienta de linea de comandos ---------------------------------------
 
-def open_stream(port, odr=None):
-    """Abre el puerto, detiene un envio anterior, descarta lo viejo y manda start."""
+def open_stream(port, odr=None, rango=None):
+    """Abre el puerto, detiene un envio anterior, descarta lo viejo, configura
+    ODR y rango (si se piden) y manda start."""
     import serial
 
     ser = serial.Serial(port, 115200, timeout=0.1)
@@ -299,6 +300,8 @@ def open_stream(port, odr=None):
     ser.reset_input_buffer()
     if odr:
         ser.write(f"odr={odr}\n".encode("ascii"))
+    if rango:
+        ser.write(f"rango={rango}\n".encode("ascii"))
     ser.write(b"start\n")
     return ser
 
@@ -322,9 +325,10 @@ def main():
     parser.add_argument("--dump", action="store_true", help="Muestra cada trama como texto")
     parser.add_argument("--seconds", type=float, default=None, help="Duracion (default: hasta Ctrl+C)")
     parser.add_argument("--odr", type=int, default=None, help="Cambia el ODR al arrancar")
+    parser.add_argument("--rango", type=int, default=None, help="Cambia el rango (2, 4, 8 o 16 g)")
     args = parser.parse_args()
 
-    ser = open_stream(args.port, args.odr)
+    ser = open_stream(args.port, args.odr, args.rango)
     dec, chk = Decoder(), Checker()
     t_end = time.monotonic() + args.seconds if args.seconds else None
     try:
