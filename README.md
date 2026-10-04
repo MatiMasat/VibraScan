@@ -5,6 +5,77 @@ con un ADXL345 sobre una Black Pill (STM32F411CEU6). Se construye por etapas;
 cada una se prueba sola antes de sumar la siguiente. Cada etapa aprobada tiene
 un tag en git (`etapa-1`, `etapa-2`, ...).
 
+## Etapa 4 - captura a archivo y gráfico en tiempo (en curso)
+
+Sobre la etapa 3. Casi todo es de PC; en el firmware solo se agregó el
+comando `rango=` y el descarte de asentamiento.
+
+### Capturar
+
+    cd pc
+    python captura.py --port COMx --minutos 30 --nota "reposo sobre la mesa"
+    python captura.py --port COMx --segundos 20 --rango 16 --nota "5 golpes"
+
+Escribe `pc/capturas/captura_<fecha>.csv` y `.json` mientras captura (el CSV
+se vuelca cada 1 s, el JSON cada 10 s): si el programa se corta, lo grabado
+queda. Si el USB se desconecta, sigue intentando y retoma sola. Ctrl+C termina
+antes de tiempo. `monitor_vivo.py` graba en el mismo formato
+(`monitor_<fecha>.csv/.json`) mientras grafica.
+
+CSV (una fila por muestra, ~85 MB por hora a 800 Hz):
+
+| Columna | Contenido |
+|---|---|
+| `seg` | segmento: muestras contiguas con ODR y rango fijos. Cambia en cada hueco, pérdida, reconexión o cambio de ODR/rango; un análisis (FFT) no debe cruzar segmentos |
+| `n` | índice del firmware (vuelve a 0 si la placa se reinicia) |
+| `t_s` | s desde el inicio: reloj del micro dentro de una conexión (`t0` del bloque + i × periodo); entre conexiones se alinea con el reloj de la PC (~10 ms) |
+| `x`, `y`, `z` | cuentas crudas; g = cuentas × 0,0039 |
+
+El JSON tiene fecha, nota, ODR, rango, escala, límites de saturación, periodo
+por regresión de `t0` contra `n`, segmentos (con su motivo), eventos,
+pérdidas y contadores del firmware al inicio y al final.
+
+### Ver
+
+    python ver_captura.py capturas/captura_<fecha>
+    python ver_captura.py capturas/captura_<fecha> --desde 100 --hasta 160
+    python ver_captura.py capturas/captura_<fecha> --png figura.png
+
+Tres ejes y |a| contra el tiempo, con zoom. Si hay más muestras que píxeles,
+cada píxel muestra el mínimo y el máximo de sus muestras: ningún pico
+desaparece, por larga que sea la captura (el monitor dibuja igual). Huecos y
+reconexiones en gris (la línea no los cruza), muestras saturadas en rojo y
+golpes marcados. Por consola: resumen, estadística por minuto y golpes.
+
+### Rango
+
+`rango=2|4|8|16` (o `--rango` en `captura.py` y el monitor). En FULL_RES la
+escala es 3,9 mg/cuenta en cualquier rango; cambia el tope (±512 cuentas a
+2 g, ±1024 a 4 g, ±2048 a 8 g, ±4096 a 16 g). Para golpes usar 16 g: a 4 g
+un golpecito en la mesa ya recorta.
+
+### Asentamiento del sensor
+
+Medido en esta etapa: después de configurar el sensor (al arrancar, con
+`odr=`, `rango=` o al reconectar el bus) la primera muestra sale desviada
+~0,12 g. El firmware descarta las 2 primeras (`SETTLE_SAMPLES`): no suman a `n`
+ni dejan hueco; el contador informativo `asent` del estado las cuenta. Pasaba
+desde la etapa 2 con `odr=`.
+
+### Probar
+
+    python -m unittest test_vibrascan_proto test_vibrascan_archivo -v   (sin placa)
+    python etapa4_prueba.py reposo capturas/captura_<fecha>   (30 min quieto)
+    python etapa4_prueba.py golpes capturas/captura_<fecha>   (5 golpes a 16 g)
+
+`etapa4_prueba.py` analiza un archivo (no captura): se puede volver a evaluar
+sin repetir la captura. Umbrales (constantes al principio del archivo):
+
+| Prueba | Chequeos |
+|---|---|
+| reposo | captura completa de 30 min; sin pérdidas y un solo segmento; contadores sin cambios; sin saturación; deriva de la media por minuto ≤ 10 mg por eje; rms de cada minuto a ±20 % de la mediana; 1 g ± 10 %; periodo por regresión dentro de `tmin`–`tmax` del firmware |
+| golpes | sin pérdidas; sin saturación; 5 golpes detectados; cada uno ≤ 100 ms sobre el umbral de 0,5 g; vuelve al reposo (±0,1 g durante 50 ms) en ≤ 500 ms |
+
 ## Etapa 3 - buffer por bloques y trama binaria con checksum (aprobada, tag `etapa-3`)
 
 Aprobada el 2026-10-04 en la placa. `etapa3_prueba.py` sin fallas a 100, 400
@@ -75,7 +146,9 @@ La PC distingue dónde se perdió algo:
 
 La trama de estado (una por segundo mientras se manda) es texto
 `estado=OK etapa=3 addr=0x53 devid=0xE5 odr=800 n=... ovr= i2c_err= drop=
-stall= bfull= hueco= int1= sps= tmin= tmax=`. Los contadores son acumulados
+stall= bfull= hueco= int1= sps= tmin= tmax=` (desde la etapa 4 además
+`rango=` después de `odr` y `asent=` después de `hueco`; ver la etapa 4 y el
+comando `rango=`). Los contadores son acumulados
 desde el arranque y deberían quedarse quietos; `int1`, `sps`, `tmin` y `tmax`
 son del último segundo completo.
 
@@ -181,6 +254,12 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
     pc/vibrascan_proto.py  protocolo del lado PC: decodificador y verificador de continuidad
     pc/test_vibrascan_proto.py  pruebas del protocolo sin placa
     pc/etapa3_prueba.py    prueba de aceptación de la etapa 3
+    pc/vibrascan_captura.py  motor de captura a archivo (reconexión, segmentos, JSON)
+    pc/captura.py          captura sin ventana
+    pc/vibrascan_archivo.py  lectura y análisis de capturas (por minuto, golpes, saturación)
+    pc/ver_captura.py      visor de capturas
+    pc/etapa4_prueba.py    prueba de aceptación de la etapa 4 (analiza archivos)
+    pc/test_vibrascan_archivo.py  pruebas de lectura y análisis sin placa
     pc/monitor_vivo.py     gráfico en tiempo real y registro de la sesión
     pc/etapa2_prueba.py    prueba de la etapa 2 (no sirve con el firmware de la 3;
                            la 3 usa sus constantes y funciones)
@@ -191,7 +270,7 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
 |---|---|---|
 | 2 | Muestreo por interrupción DATA_READY (INT1 a un pin EXTI) y ODR más alto | muestras/s = ODR, sin saltos (aprobada) |
 | 3 | Buffer por bloques y trama binaria con checksum | minutos sin pérdidas (aprobada) |
-| 4 | Captura a archivo y gráfico en tiempo | reposo estable, golpe visible |
+| 4 | Captura a archivo y gráfico en tiempo | reposo estable, golpe visible (en curso) |
 | 5 | Preproceso y FFT/PSD en Python | pico en la frecuencia de una fuente conocida |
 | 6 | SPI a 3200 Hz (con el FIFO del ADXL345) | igual que 2 y 3 |
 | 7 | FFT y filtro adaptativo (LMS) en el micro | mismo resultado que en Python |
