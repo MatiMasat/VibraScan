@@ -5,6 +5,81 @@ con un ADXL345 sobre una Black Pill (STM32F411CEU6). Se construye por etapas;
 cada una se prueba sola antes de sumar la siguiente. Cada etapa aprobada tiene
 un tag en git (`etapa-1`, `etapa-2`, ...).
 
+## Etapa 5 - preproceso y FFT/PSD en Python (aprobada, tag `etapa-5`)
+
+Solo PC; el firmware es el de la etapa 4.
+
+### Método (`pc/vibrascan_espectro.py`)
+
+PSD por el método de Welch escrito con numpy (sin scipy), para que la
+etapa 7 lo replique en el micro con las mismas convenciones:
+
+| | |
+|---|---|
+| Ventana | Hann periódica: w[k] = 0,5 − 0,5 cos(2πk/n), k = 0..n−1 |
+| Tramos | 4096 muestras (~5,1 s, resolución ~0,19 Hz), solapados al 50 % |
+| Preproceso | a cada tramo se le resta su media (gravedad y deriva lenta) |
+| Escala | densidad de una cara en g²/Hz: P = 2 \|FFT(x·w)\|² / (fs·Σw²), sin duplicar DC ni Nyquist. Parseval: ∫P df = varianza |
+| Segmentos | dentro de cada segmento de la captura (nunca a través de un hueco), con la **tasa medida** de cada uno, interpoladas a una grilla común; no mezcla ODR |
+| Picos | máximos que superan al piso local (mediana ±20 Hz) en ≥ 10 dB; frecuencia por interpolación parabólica del log de la PSD; amplitud rms integrando ±3 bins menos el piso |
+| Espectrograma | tramos de 256 muestras (~3,1 Hz de resolución), paso 64 |
+
+Ejes por separado y su suma (energía total sin depender de la orientación).
+No se usa |a|: no es lineal y crea armónicas falsas.
+
+### Herramientas
+
+    cd pc
+    python -m unittest test_vibrascan_espectro -v                  (sin placa)
+    python espectro.py capturas/captura_<fecha>                    (PSD y tabla de picos)
+    python espectro.py capturas/captura_<fecha> --espectrograma --desde 10 --hasta 30 --png f.png
+    python etapa5_prueba.py capturas/captura_<fecha> --frecuencia 250
+
+`espectro.py` marca los picos que son armónicas del principal, directas o
+**reflejadas por aliasing**, y avisa si la señal no es estacionaria (Parseval
+< 0,95, por ejemplo con golpes): ahí los "picos" pueden ser ondulaciones de
+una resonancia ancha y conviene mirar el espectrograma.
+
+`etapa5_prueba.py` (una captura por tono, empezando con unos segundos de
+silencio): sin pérdidas; el tono aparece en el espectrograma después de ≥ 2 s
+de silencio (descarta un pico del ambiente); PSD desde el encendido; pico más
+fuerte a ±0,5 Hz de la frecuencia (o de su alias si está por encima de fs/2);
+≥ 20 dB sobre el piso; Parseval ±2 %.
+
+### Resultados (2026-10-04, parlante de celular con un generador de tonos)
+
+| Tono | Pico | Error | Sobre el piso | Amplitud | Tasa medida |
+|---|---|---|---|---|---|
+| 150 Hz | 150,00 Hz | < 0,01 Hz | 37,4 dB | 22 mg rms | 794,44 Hz |
+| 250 Hz | 249,98 Hz | −0,02 Hz | 40,2 dB | 29 mg rms | 793,54 Hz |
+| 350 Hz | 349,97 Hz | −0,03 Hz | 44,3 dB | 44 mg rms | 793,69 Hz |
+| 500 Hz (> fs/2) | 293,34 Hz (alias de 793,30 − 500) | +0,04 Hz | 53,1 dB | 141 mg rms | 793,30 Hz |
+
+Todas aprobadas (silencio previo, sin pérdidas, Parseval dentro de ±1,1 %).
+Reposo de 30 min: sin picos, Parseval 1,000, piso 265/303/322 µg/√Hz
+(x/y/z), coherente con el rms de la etapa 4.
+
+Lo que mostraron:
+
+- **Tasa medida, no nominal.** El sensor muestreó entre 793,3 y 796,3 Hz
+  según la captura. Con 800 Hz el tono de 350 Hz habría salido en ~352,8 Hz.
+- **Aliasing.** El parlante distorsiona: sus armónicas 2 y 3 (500, 700,
+  750 Hz) aparecen reflejadas por debajo de fs/2 (295, 94, 45 Hz). A 350 Hz,
+  en el eje y el pico más fuerte era la armónica 2 reflejada (93,8 Hz), no el
+  tono. Un tono de 500 Hz apareció en 293,3 Hz con 141 mg, más que cualquier
+  tono dentro de la banda: a 800 Hz de ODR el filtro del sensor casi no
+  atenúa por encima de fs/2. **A 800 Hz solo son confiables fuentes sin
+  contenido importante por encima de ~397 Hz**; si no, un pico puede ser una
+  frecuencia más alta reflejada. La etapa 6 (SPI a 3200 Hz) lleva el límite
+  a ~1600 Hz.
+- **Golpes.** Cada golpe excita todas las frecuencias (línea vertical en el
+  espectrograma) y deja una oscilación de la mesa/protoboard de ~7–25 Hz
+  durante ~0,5 s (en y, máximo en ~7,6 Hz).
+- **Pregunta abierta.** Con el tono prendido aparecen picos laterales
+  (9,4 Hz de separación a 150 Hz; 15,6 Hz a 250 y 500 Hz). No coinciden con
+  ninguna frecuencia del sistema (bloques a ~24,8 Hz, estado a 1 Hz);
+  probablemente vienen de la fuente.
+
 ## Etapa 4 - captura a archivo y gráfico en tiempo (aprobada, tag `etapa-4`)
 
 Aprobada el 2026-10-04 en la placa:
@@ -287,6 +362,10 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
     pc/ver_captura.py      visor de capturas
     pc/etapa4_prueba.py    prueba de aceptación de la etapa 4 (analiza archivos)
     pc/test_vibrascan_archivo.py  pruebas de lectura y análisis sin placa
+    pc/vibrascan_espectro.py  PSD por Welch (numpy), picos, aliasing, espectrograma
+    pc/espectro.py         espectro y espectrograma de una captura
+    pc/etapa5_prueba.py    prueba de aceptación de la etapa 5 (tono de frecuencia conocida)
+    pc/test_vibrascan_espectro.py  pruebas del espectro sin placa
     pc/monitor_vivo.py     gráfico en tiempo real y registro de la sesión
     pc/etapa2_prueba.py    prueba de la etapa 2 (no sirve con el firmware de la 3;
                            la 3 usa sus constantes y funciones)
@@ -298,7 +377,7 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
 | 2 | Muestreo por interrupción DATA_READY (INT1 a un pin EXTI) y ODR más alto | muestras/s = ODR, sin saltos (aprobada) |
 | 3 | Buffer por bloques y trama binaria con checksum | minutos sin pérdidas (aprobada) |
 | 4 | Captura a archivo y gráfico en tiempo | reposo estable, golpe visible (aprobada) |
-| 5 | Preproceso y FFT/PSD en Python | pico en la frecuencia de una fuente conocida |
+| 5 | Preproceso y FFT/PSD en Python | pico en la frecuencia de una fuente conocida (aprobada) |
 | 6 | SPI a 3200 Hz (con el FIFO del ADXL345) | igual que 2 y 3 |
 | 7 | FFT y filtro adaptativo (LMS) en el micro | mismo resultado que en Python |
 

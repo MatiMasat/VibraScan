@@ -40,7 +40,15 @@ https://github.com/MatiMasat/VibraScan.git.
 | `etapa-2` | Interrupción DATA_READY (INT1 → PB0, EXTI0), I2C 400 kHz, hasta 800 Hz | Aprobada el 2026-10-03 (automática y manual) |
 | `etapa-3` | Bloques de 32 muestras y trama binaria con CRC-16, `start`/`stop`, huecos con `t0` | Aprobada el 2026-10-04 (automática 10 min y manual) |
 | `etapa-4` | Captura a archivo (CSV de cuentas + JSON, segmentos, reconexión), visor con envolvente, `rango=`, descarte de asentamiento | Aprobada el 2026-10-04 (reposo 30 min, golpes, manual) |
-| (sin rama) | 5: preproceso y FFT/PSD en Python | Próxima |
+| `etapa-5` | PSD por Welch propio en numpy (convenciones para la etapa 7), espectrograma, aliasing | Aprobada el 2026-10-04 (tonos de 150/250/350 Hz y 500 Hz reflejado) |
+| (sin rama) | 6: SPI a 3200 Hz (con el FIFO del ADXL345) | Próxima |
+
+Para la etapa 6: a 800 Hz el filtro del sensor casi no atenúa por encima
+de fs/2 (un tono de 500 Hz apareció en 293 Hz con más amplitud que los
+tonos dentro de la banda). Fuente de prueba que funciona: el parlante del
+celular con un generador de tonos, empezando cada captura con ~5 s de
+silencio. La etapa 7 tiene que copiar las convenciones del Welch del
+README (Hann periódica, 50 %, media por tramo, escala de densidad).
 
 Desde la etapa 3 el enlace es binario (ver README y `pc/vibrascan_proto.py`):
 un monitor serie ya no sirve para mirar los datos; usar
@@ -85,9 +93,11 @@ hay que ubicar las equivalentes y, si cambian, anotarlas acá.
   ```
   Para leer RAM o registros sin resetear se usa `mode=HOTPLUG`.
 - **Probar** (con el USB conectado), desde `pc/`: `etapa3_prueba.py`,
-  `captura.py` + `etapa4_prueba.py`, `monitor_vivo.py` y `ver_captura.py`
-  (sin placa: `python -m unittest test_vibrascan_proto test_vibrascan_archivo`;
-  `ver_captura.py --png` sirve para mirar capturas sin abrir ventana). Los
+  `captura.py` + `etapa4_prueba.py`, `monitor_vivo.py`, `ver_captura.py`,
+  `espectro.py` y `etapa5_prueba.py` (sin placa:
+  `python -m unittest test_vibrascan_proto test_vibrascan_archivo test_vibrascan_espectro`;
+  `ver_captura.py --png` y `espectro.py --png` sirven para mirar capturas sin
+  abrir ventana). Los
   argumentos están en el README. En la PC de escritorio la Black Pill aparece
   como **COM8**. Se puede ver con `--list`.
 - Python 3.9, con `pyserial`, `matplotlib` y `numpy` (`pc/requirements.txt`). Las
