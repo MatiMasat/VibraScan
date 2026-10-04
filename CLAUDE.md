@@ -22,8 +22,9 @@ https://github.com/MatiMasat/VibraScan.git.
   1. `git switch main` y `git merge --no-ff refs/heads/etapa-N -m "..."`
      (`--no-ff`: en Git Graph la etapa se ve como rama con sus pasos).
   2. `git tag -a etapa-N -m "..."` sobre el merge y `git push origin main etapa-N`.
-  3. **Borrar la rama** (`git branch -d etapa-N` y
-     `git push origin --delete refs/heads/etapa-N`): el tag tiene el mismo
+  3. **Borrar la rama**, primero en GitHub y después la local
+     (`git push origin --delete refs/heads/etapa-N` y `git branch -d etapa-N`;
+     al revés, `-d` se niega si la copia de GitHub quedó atrás): el tag tiene el mismo
      nombre y, si conviven, git los confunde ("refname is ambiguous"). Los
      pasos quedan en el historial del merge.
   Mientras convivan rama y tag, usar `refs/heads/...` y `refs/tags/...`.
