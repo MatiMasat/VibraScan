@@ -6,13 +6,17 @@ responde el sensor al moverlo. Ademas registra la sesion en pc/capturas/:
     monitor_<fecha>.log   eventos (tramas perdidas, descartes, huecos, CRC,
                           cortes, golpes, caras, contadores), una linea por
                           segundo y un resumen al cerrar
-    monitor_<fecha>.csv   todas las muestras crudas (t_pc_s, t_us, n, x, y, z)
+    monitor_<fecha>.csv   la captura, en el formato de captura.py (seg,n,t_s,x,y,z)
+    monitor_<fecha>.json  y sus metadatos: se abre con ver_captura.py
     monitor_<fecha>_N.png imagen del grafico: con la tecla "g" y al cerrar
+
+Si el USB se desconecta, el monitor sigue intentando y retoma solo.
 
 Uso:
     python monitor_vivo.py --port COM8
     python monitor_vivo.py --port COM8 --window 5 --ylim 4
     python monitor_vivo.py --port COM8 --odr 400      (cambia el ODR del sensor)
+    python monitor_vivo.py --port COM8 --rango 16     (cambia el rango: 2, 4, 8 o 16 g)
     python monitor_vivo.py --port COM8 --no-csv       (no guarda las muestras)
 
 Cerrar la ventana para terminar. El puerto no puede estar abierto por otro
@@ -28,21 +32,27 @@ import math
 import os
 import sys
 import threading
+import re
 import time
 import traceback
 
 import matplotlib.pyplot as plt
+import numpy as np
 import serial
 from matplotlib.animation import FuncAnimation
 
+import vibrascan_archivo as va
 import vibrascan_proto as vp
-from etapa2_prueba import G_PER_LSB, RATE_TOLERANCE
+from vibrascan_captura import COUNTERS, G_PER_LSB, Captura
 
-COUNTERS = ("ovr", "i2c_err", "drop", "stall", "bfull", "hueco")
+RATE_TOLERANCE = 0.05   # sps puede diferir 5 % del ODR nominal
+EVENT_LABELS = {"seq": "TRAMA PERDIDA", "n": "DESCARTE", "hueco": "HUECO", "crc": "CRC",
+                "puerto_perdido": "PUERTO PERDIDO", "reconexion": "RECONEXION", "odr": "ODR",
+                "rango": "RANGO", "estado": "ESTADO NO OK", "inicio": "inicio",
+                "respuesta": "respuesta del firmware", "ovr": "OVERRUN"}
 
 AXES = (("X", "tab:blue"), ("Y", "tab:orange"), ("Z", "tab:green"))
 FS_MAX = 3200           # el buffer alcanza para la ventana completa hasta este ODR
-MAX_PLOT_POINTS = 4000  # por eje; con mas, se dibuja 1 de cada k muestras
 CAPTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "capturas")
 
 FREEZE_S = 0.5          # sin muestras durante este tiempo = corte de datos
@@ -94,23 +104,20 @@ def face_of(x, y, z):
 
 
 class Reader(threading.Thread):
-    """Lee las tramas en segundo plano, guarda las ultimas muestras y registra la sesion."""
+    """Lee con el motor de captura en segundo plano (graba, se reconecta), guarda
+    las ultimas muestras para el grafico y registra la sesion."""
 
-    def __init__(self, port, maxlen, log, csv_path, default_fs, odr=None):
+    def __init__(self, port, maxlen, log, base, default_fs, odr=None, rango=None):
         super().__init__(daemon=True)
-        self.ser = vp.open_stream(port, odr)
+        self.cap = Captura(port, base, odr, rango, nota="monitor_vivo")
         self.log = log
-        self.csv = open(csv_path, "w", encoding="ascii") if csv_path else None
-        if self.csv:
-            self.csv.write("t_pc_s,t_us,n,x,y,z\n")
         self.fs = default_fs
         self.samples = collections.deque(maxlen=maxlen)   # (n, x_g, y_g, z_g)
         self.status = {}
-        self.dec = vp.Decoder()
-        self.chk = vp.Checker()
         self.lock = threading.Lock()
         self.running = True
         self.plot_span = 0.0     # segundos que ocupa la curva (lo escribe el grafico)
+        self.losses = ""         # lo calcula este hilo; el grafico solo lo lee
 
         # Estadisticas para el log y el resumen
         self.total = 0
@@ -119,7 +126,6 @@ class Reader(threading.Thread):
         self.frozen_since = None
         self.freezes = []          # duracion de cada corte [s]
         self.holes = []            # (t, ms) de cada hueco
-        self.crc_seen = 0
         self.first_counters = None
         self.last_counters = {}
         self.sps_seen = []
@@ -136,53 +142,34 @@ class Reader(threading.Thread):
     def run(self):
         while self.running:
             try:
-                chunk = self.ser.read(self.ser.in_waiting or 1)
-            except serial.SerialException as e:
-                if self.running:
-                    self.log.write(f"ERROR: se perdio el puerto ({e})")
-                break
-            self._check_freeze()
-            if not chunk:
+                frames, events = self.cap.poll()
+            except Exception:
+                self.log.write("ERROR leyendo:\n" + traceback.format_exc())
+                time.sleep(0.5)
                 continue
-            for frame in self.dec.feed(chunk):
+            for kind, text in events:
+                self._on_event(kind, text)
+            self._check_freeze()
+            for frame in frames:
                 self._on_frame(frame)
-            if self.dec.crc_errors != self.crc_seen:
-                self.log.write(f"CRC: {self.dec.crc_errors - self.crc_seen} trama(s) con CRC mal, "
-                               "descartadas")
-                self.crc_seen = self.dec.crc_errors
+            self.losses = self._losses()
+
+    def _on_event(self, kind, text):
+        if kind == "hueco":
+            m = re.search(r"hueco de ([\d.]+) ms", text)
+            self.holes.append((self.log.now(), float(m.group(1)) if m else 0.0))
+        self.log.write(f"{EVENT_LABELS.get(kind, kind.upper())}: {text}", echo=kind != "ovr")
 
     def _on_frame(self, frame):
-        with self.lock:
-            events = self.chk.frame(frame)
-        for ev in events:
-            if ev.kind == "seq":
-                self.log.write(f"TRAMA PERDIDA: {ev.text}")
-            elif ev.kind == "n":
-                self.log.write(f"DESCARTE: {ev.text}")
-            elif ev.kind == "hueco":
-                ms = ev.count * (self.chk.period_us or 0) / 1000
-                self.holes.append((self.log.now(), ms))
-                self.log.write(f"HUECO: {ev.text}")
-            elif ev.kind == "ovr":
-                self.log.write(f"OVERRUN: {ev.text}", echo=False)
-            elif ev.kind == "inicio":
-                self.log.write(f"inicio: {ev.text}")
-            else:
-                self.log.write(f"{ev.kind.upper()}: {ev.text}")
-
         if frame.ftype == vp.TYPE_SAMPLES:
             blk = vp.parse_block(frame)
             if blk is None:
                 return
             self.fs = float(blk.odr) or self.fs
             for i, (x, y, z) in enumerate(blk.samples):
-                self._on_sample(blk.n0 + i, x, y, z, blk.t0)
-        else:
-            text = frame.payload.decode("ascii", errors="replace")
-            if frame.ftype == vp.TYPE_STATUS:
-                self._on_status(text)
-            else:
-                self.log.write(f"respuesta del firmware: {text}")
+                self._on_sample(blk.n0 + i, x, y, z)
+        elif frame.ftype == vp.TYPE_STATUS:
+            self._on_status(frame.payload.decode("ascii", errors="replace"))
 
     def _check_freeze(self):
         if self.last_sample_t is None or self.frozen_since is not None:
@@ -192,7 +179,7 @@ class Reader(threading.Thread):
             self.frozen_since = self.last_sample_t
             self.log.write(f"CORTE: sin muestras hace {limit:.1f} s (ultima n={self.last_n})")
 
-    def _on_sample(self, n, x, y, z, t0_us):
+    def _on_sample(self, n, x, y, z):
         now = time.monotonic()
         if self.frozen_since is not None:
             dur = now - self.frozen_since
@@ -200,11 +187,11 @@ class Reader(threading.Thread):
             self.log.write(f"DATOS DE NUEVO tras {dur:.2f} s sin muestras (n={n})")
             self.frozen_since = None
         self.last_sample_t = now
-        if self.csv:
-            self.csv.write(f"{self.log.now():.4f},{t0_us},{n},{x},{y},{z}\n")
 
         gx, gy, gz = x * G_PER_LSB, y * G_PER_LSB, z * G_PER_LSB
         with self.lock:
+            if self.last_n is not None and n < self.last_n:
+                self.samples.clear()     # n retrocedio: la placa se reinicio (reconexion)
             self.last_n = n
             self.samples.append((n, gx, gy, gz))
         self.total += 1
@@ -279,27 +266,20 @@ class Reader(threading.Thread):
         self.log.write(text, echo=False)
 
     def _losses(self):
-        c = self.chk
-        return f"tramas:{c.lost_frames} micro:{c.lost_in_micro} huecos:{c.gaps} crc:{self.dec.crc_errors}"
+        t = self.cap.totals()
+        return (f"tramas:{t['tramas_perdidas']} micro:{t['descartadas_micro']} huecos:{t['huecos']} "
+                f"crc:{t['crc_mal']} reconexiones:{t['reconexiones']}")
 
     def snapshot(self):
         with self.lock:
-            return list(self.samples), dict(self.status), self._losses()
+            return list(self.samples), dict(self.status), self.losses
 
     def close(self):
         self.running = False
         self.join(timeout=1.0)
-        # Si el USB se desconecto, el puerto ya no existe y Windows puede
-        # tirar cualquier error al usarlo: no debe impedir el resumen
-        try:
-            self.ser.write(b"stop\n")
-            self.ser.close()
-        except (serial.SerialException, OSError) as e:
-            self.log.write(f"al cerrar el puerto: {e}")
+        self.cap.close()       # manda stop y cierra los archivos (tolera un puerto perdido)
         if self.frozen_since is not None:
             self.freezes.append(time.monotonic() - self.frozen_since)
-        if self.csv:
-            self.csv.close()
 
 
 def summarize(reader, log, window):
@@ -314,12 +294,13 @@ def summarize(reader, log, window):
         log.raw(f"  sps: {min(r.sps_seen)}-{max(r.sps_seen)} (odr={odr:.0f})")
     if r.tmin_seen:
         log.raw(f"  periodo entre interrupciones: {min(r.tmin_seen)}-{max(r.tmax_seen)} us")
-    c = r.chk
-    log.raw(f"  tramas: {r.dec.frames}, con CRC mal: {r.dec.crc_errors}, "
-            f"bytes descartados: {r.dec.skipped}")
-    log.raw(f"  tramas perdidas (USB/PC): {c.lost_frames} ({c.lost_in_transit} muestras)")
-    log.raw(f"  muestras descartadas en el micro: {c.lost_in_micro}")
-    log.raw(f"  huecos de INT1: {c.gaps} (~{c.gap_samples} muestras)"
+    c = r.cap.totals()
+    log.raw(f"  tramas: {c['tramas']}, con CRC mal: {c['crc_mal']}, "
+            f"bytes descartados: {c['bytes_descartados']}")
+    log.raw(f"  tramas perdidas (USB/PC): {c['tramas_perdidas']} ({c['muestras_en_tramas_perdidas']} muestras)")
+    log.raw(f"  muestras descartadas en el micro: {c['descartadas_micro']}")
+    log.raw(f"  reconexiones del USB: {c['reconexiones']}")
+    log.raw(f"  huecos de INT1: {c['huecos']} (~{c['muestras_en_huecos']} muestras)"
             + (": " + ", ".join(f"{ms / 1000:.1f} s" for _, ms in r.holes) if r.holes else ""))
     log.raw(f"  cortes de datos: {len(r.freezes)}"
             + (f" (el mas largo {max(r.freezes):.2f} s)" if r.freezes else ""))
@@ -358,10 +339,11 @@ def summarize(reader, log, window):
           + (" (" + ", ".join(f"{ms / 1000:.1f} s" for _, ms in r.holes) + ")" if r.holes else "")
           + f", {len(r.freezes)} corte(s) del grafico, "
           + ("se recupero" if r.frozen_since is None else "SIGUE CORTADO al cerrar"))
-    lost = c.lost_frames + c.lost_in_micro + r.dec.crc_errors
+    lost = c["tramas_perdidas"] + c["descartadas_micro"] + c["crc_mal"]
     check("5 Sin perdidas", lost == 0,
-          f"tramas perdidas={c.lost_frames}, descartadas en el micro={c.lost_in_micro}, "
-          f"CRC mal={r.dec.crc_errors} (los huecos de la prueba 4 no cuentan)")
+          f"tramas perdidas={c['tramas_perdidas']}, descartadas en el micro={c['descartadas_micro']}, "
+          f"CRC mal={c['crc_mal']} (los huecos de la prueba 4 no cuentan"
+          + (f"; hubo {c['reconexiones']} reconexion(es) del USB" if c["reconexiones"] else "") + ")")
     log.raw("=" * 70)
 
 
@@ -375,6 +357,8 @@ def main():
                         help="Tasa de muestreo hasta recibir la primera linea de estado (default: 800)")
     parser.add_argument("--odr", type=int, default=None, metavar="HZ",
                         help="Cambia el ODR del sensor al arrancar: 100, 200, 400 u 800")
+    parser.add_argument("--rango", type=int, choices=(2, 4, 8, 16), default=None,
+                        help="Cambia el rango del sensor al arrancar, en g")
     parser.add_argument("--no-csv", action="store_true", help="No guarda las muestras crudas")
     args = parser.parse_args()
 
@@ -386,7 +370,7 @@ def main():
 
     try:
         reader = Reader(args.port, int(args.window * FS_MAX), log,
-                        None if args.no_csv else base + ".csv", args.fs, args.odr)
+                        None if args.no_csv else base, args.fs, args.odr, args.rango)
     except serial.SerialException as e:
         log.write(f"No se pudo abrir {args.port}: {e}")
         log.close()
@@ -406,7 +390,7 @@ def main():
     axs[-1].set_xlim(-args.window, 0)
     axs[-1].set_xlabel('Tiempo [s] (0 = ahora)   -   tecla "g": guardar imagen')
     title = fig.suptitle(f"VibraScan - {args.port} - esperando datos...")
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.9))   # lugar para las 3 lineas del titulo
 
     shots = [0]
 
@@ -432,15 +416,15 @@ def main():
             return
         fs = float(status.get("odr", 0) or 0) or args.fs
         n_last = samples[-1][0]
-        # Solo la ventana visible; si son muchas muestras se dibuja 1 de cada k
-        visible = [s for s in samples if (n_last - s[0]) <= args.window * fs]
-        step = max(1, math.ceil(len(visible) / MAX_PLOT_POINTS))
-        shown = visible[::step]
-        t = [(s[0] - n_last) / fs for s in shown]
+        # Solo la ventana visible. Si hay mas muestras que pixeles, cada pixel
+        # muestra el minimo y el maximo de sus muestras: ningun pico se pierde
+        arr = np.array([s for s in samples if 0 <= n_last - s[0] <= args.window * fs])
+        t = (arr[:, 0] - n_last) / fs
         with reader.lock:
             reader.plot_span = -t[0]
+        width = max(200, int(axs[0].bbox.width))
         for i, ln in enumerate(lines):
-            ln.set_data(t, [s[i + 1] for s in shown])
+            ln.set_data(*va.envolvente(t, arr[:, i + 1], width))
         x, y, z = samples[-1][1:]
         for lbl, v in zip(labels, (x, y, z)):
             lbl.set_text(f"{v:+.3f} g")
@@ -449,8 +433,8 @@ def main():
                        f"odr={status.get('odr', '?')} sps={status.get('sps', '?')} "
                        f"periodo={status.get('tmin', '?')}-{status.get('tmax', '?')} us\n"
                        f"estado={status.get('estado', '?')} drop={status.get('drop', '?')} "
-                       f"stall={status.get('stall', '?')} perdidas {losses}"
-                       + (f" (dibujando 1 de cada {step})" if step > 1 else ""))
+                       f"stall={status.get('stall', '?')} rango={status.get('rango', '?')} g\n"
+                       f"perdidas {losses}" + ("  (SIN PUERTO, reintentando)" if reader.cap.ser is None else ""))
 
     fig.canvas.mpl_connect("close_event", lambda _e: save_png("al cerrar"))
     anim = FuncAnimation(fig, update, interval=50, cache_frame_data=False)  # noqa: F841
@@ -460,7 +444,8 @@ def main():
         summarize(reader, log, args.window)
     except Exception:
         log.raw("ERROR armando el resumen:\n" + traceback.format_exc())
-    log.raw(f"Registro: {base}.log")
+    log.raw(f"Registro: {base}.log" + ("" if args.no_csv else
+            f"\nCaptura: {base}.csv/.json  ->  python ver_captura.py {base}"))
     log.close()
     return 0
 
