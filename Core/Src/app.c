@@ -1,30 +1,34 @@
 /**
   * @file    app.c
-  * @brief   VibraScan - Etapa 4: etapa 3 (bloques y trama binaria con CRC) + comando rango=.
+  * @brief   VibraScan - Etapa 6: ADXL345 por SPI con FIFO, hasta 3200 Hz.
   *
   * Que hace:
-  *   - Busca el sensor (0x53 y 0x1D), verifica DEVID y lo configura con
-  *     DATA_READY por INT1 -> PB0.
-  *   - Cada flanco de subida en PB0 (EXTI) toma la hora (us del micro) y
-  *     lanza una lectura I2C por interrupcion (no bloquea): 8 registros desde
-  *     INT_SOURCE, que traen la muestra y el bit OVERRUN.
-  *   - Al terminar la lectura, la muestra se agrega al bloque en curso. Un
-  *     bloque tiene hasta BLOCK_SAMPLES muestras contiguas; se cierra al
-  *     llenarse, al detectar un hueco (mas de 1,5 periodos desde la muestra
-  *     anterior) o al cambiar el ODR.
+  *   - Configura el sensor por SPI (sensor_spi.c), verifica DEVID y pone su
+  *     FIFO en modo stream con la interrupcion watermark por INT1 -> PB0 al
+  *     juntar FIFO_WATERMARK muestras.
+  *   - Cada flanco de INT1 (EXTI) toma la hora y lanza un lote de lecturas
+  *     por DMA, encadenadas en las interrupciones: FIFO_STATUS (cuantas
+  *     muestras hay) y despues cada muestra (DATAX0..DATAZ1). La muestra
+  *     FIFO_WATERMARK - 1 del lote es la del flanco; las demas se ubican con
+  *     el periodo nominal. Si al terminar INT1 sigue en alto (el watermark es
+  *     por nivel y no daria otro flanco) se lanza otro lote enseguida.
+  *   - Cada muestra va al bloque en curso. Un bloque tiene hasta
+  *     BLOCK_SAMPLES muestras contiguas; se cierra al llenarse, ante un hueco
+  *     (mas de 1,5 periodos entre muestras o FIFO lleno) o al cambiar el ODR.
   *   - app_loop() manda cada bloque cerrado como una trama binaria con CRC
   *     (ver trama.h y pc/vibrascan_proto.py), varias tramas por envio USB.
-  *     Si el USB se demora, el muestreo no se entera: los bloques esperan.
-  *   - No se manda nada hasta que la PC envia "start": asi no quedan datos
-  *     viejos en camino al abrir el puerto. Con "stop", o si el USB se
-  *     desconecta, deja de mandar.
+  *   - No se manda nada hasta que la PC envia "start". Con "stop", o si el
+  *     USB se desconecta, deja de mandar.
+  *   - Una vez por segundo lee DEVID: SPI no tiene acuse de recibo, y un
+  *     sensor desconectado se leeria como datos (0x00 o 0xFF) sin error.
   *   - Mientras manda, una trama de estado por segundo (texto).
   *
   * El unico reloj de muestreo sigue siendo el del ADXL345.
   *
   * Contadores de la trama de estado (todos deberian quedarse en 0):
-  *   ovr      lecturas en las que el sensor ya habia pisado una muestra
-  *   i2c_err  transferencias I2C fallidas
+  *   ovr      lotes en los que el FIFO estaba lleno (se perdieron muestras)
+  *   bus_err  transferencias SPI fallidas, FIFO_STATUS imposible o DEVID
+  *            incorrecto en el chequeo periodico
   *   drop     muestras que no se pudieron mandar a la PC
   *   stall    veces que INT1 quedo en alto sin lectura en curso y hubo que
   *            relanzarla desde app_loop (se perdio un flanco)
@@ -36,15 +40,16 @@
   * (SETTLE_SAMPLES cada vez: al arrancar, con odr=, rango= o al reconectar).
   *
   * Campos informativos (del ultimo segundo):
-  *   int1     flancos de subida en PB0 (= odr)
+  *   fifo     muestras por aviso de INT1 (FIFO_WATERMARK)
+  *   int1     flancos de INT1 (~ odr / fifo)
   *   sps      muestras leidas (= odr)
-  *   tmin     periodo minimo entre flancos de INT1, en us (reloj del micro)
-  *   tmax     periodo maximo; si tmax ~ 2 x tmin se perdio un flanco
+  *   tmin     intervalo minimo entre flancos de INT1, en us (reloj del micro)
+  *   tmax     intervalo maximo (~ fifo x periodo; mucho mas = se demoro un lote)
   *
   * Comandos de la PC (una linea de texto; la respuesta va en una trama):
   *   start     vacia el buffer, reinicia seq y empieza a mandar
   *   stop      deja de mandar (el sensor sigue midiendo)
-  *   odr=<Hz>  cambia el ODR: 100, 200, 400 u 800 (por defecto 800)
+  *   odr=<Hz>  cambia el ODR: 100, 200, 400, 800, 1600 o 3200 (por defecto 800)
   *   rango=<g> cambia el rango: 2, 4, 8 o 16 g (por defecto 4). En FULL_RES la
   *             escala es 3,9 mg/cuenta en cualquier rango; cambia el tope.
   *             Si se manda mientras se transmite, la reconfiguracion deja un
@@ -61,53 +66,34 @@
 
 #include "main.h"
 #include "adxl345.h"
+#include "sensor_spi.h"
 #include "trama.h"
 #include "usb_link.h"
 
 /* ---- Configuracion de la etapa ------------------------------------------ */
-#define APP_STAGE             4
+#define APP_STAGE             6
 #define APP_RATE_DEFAULT      ADXL345_RATE_800HZ   /* se cambia con el comando odr= */
-#define APP_RATE_MAX          ADXL345_RATE_800HZ   /* 1600 y 3200 Hz piden SPI (etapa 6) */
+#define APP_RATE_MAX          ADXL345_RATE_3200HZ
 #define APP_RANGE_DEFAULT     ADXL345_RANGE_4G     /* se cambia con el comando rango= */
 
-#define I2C_TIMEOUT_MS        10U
+#define FIFO_WATERMARK        16U     /* aviso con 16 de 32: 5 ms de margen a 3200 Hz */
+#define STOP_TIMEOUT_MS       10U
 #define STATUS_PERIOD_MS      1000U
 #define RETRY_PERIOD_MS       500U
 #define ERROR_BLINK_MS        100U
 #define MAX_CONSECUTIVE_ERR   10U
 
-#define BLOCK_SAMPLES         32U     /* muestras por bloque = por trama (40 ms a 800 Hz) */
-#define BLOCK_COUNT           32U     /* bloques; potencia de 2 (1024 muestras, 1,3 s a 800 Hz) */
+#define BLOCK_SAMPLES         32U     /* muestras por bloque = por trama (10 ms a 3200 Hz) */
+#define BLOCK_COUNT           128U    /* bloques; potencia de 2 (4096 muestras, 1,3 s a 3200 Hz) */
 #define TX_BATCH_SIZE         512U    /* bytes por envio USB (<= USB_LINK_MAX_WRITE): 2 tramas */
-#define TEXT_MAX              256U    /* texto de estado o respuesta (el estado ocupa hasta 249) */
+#define TEXT_MAX              288U    /* texto de estado o respuesta (el estado ocupa hasta 256) */
 #define SETTLE_SAMPLES        2U      /* muestras descartadas tras configurar el sensor */
 
 _Static_assert(TX_BATCH_SIZE <= USB_LINK_MAX_WRITE, "TX_BATCH_SIZE mayor que lo que acepta usb_link");
 _Static_assert((BLOCK_COUNT & (BLOCK_COUNT - 1U)) == 0U, "BLOCK_COUNT debe ser potencia de 2");
 _Static_assert(BLOCK_SAMPLES <= 255U, "cant es de 8 bits");
-
-
-extern I2C_HandleTypeDef hi2c1;
-
-/* ---- Acceso al bus: lo unico que cambia al pasar a SPI ------------------- */
-typedef struct {
-  I2C_HandleTypeDef *hi2c;
-  uint16_t           addr;    /* direccion de 7 bits ya desplazada (<< 1) */
-} i2c_ctx_t;
-
-static int i2c_read(void *ctx, uint8_t reg, uint8_t *buf, uint16_t len)
-{
-  i2c_ctx_t *c = (i2c_ctx_t *)ctx;
-  return (HAL_I2C_Mem_Read(c->hi2c, c->addr, reg, I2C_MEMADD_SIZE_8BIT,
-                           buf, len, I2C_TIMEOUT_MS) == HAL_OK) ? 0 : -1;
-}
-
-static int i2c_write(void *ctx, uint8_t reg, const uint8_t *buf, uint16_t len)
-{
-  i2c_ctx_t *c = (i2c_ctx_t *)ctx;
-  return (HAL_I2C_Mem_Write(c->hi2c, c->addr, reg, I2C_MEMADD_SIZE_8BIT,
-                            (uint8_t *)buf, len, I2C_TIMEOUT_MS) == HAL_OK) ? 0 : -1;
-}
+_Static_assert((FIFO_WATERMARK > 0U) && (FIFO_WATERMARK < ADXL345_FIFO_SIZE), "watermark de 1 a 31");
+_Static_assert(ADXL345_DATA_LEN <= SENSOR_SPI_MAX_READ, "una muestra no entra en una lectura");
 
 /* ---- Bloque de muestras -------------------------------------------------- */
 
@@ -116,7 +102,7 @@ static int i2c_write(void *ctx, uint8_t reg, const uint8_t *buf, uint16_t len)
    BLOCK_HEADER_LEN + 6 x cant bytes. */
 typedef struct {
   uint32_t         n0;      /* indice de la primera muestra */
-  uint32_t         t0;      /* us del micro en el flanco de la primera muestra */
+  uint32_t         t0;      /* us del micro de la primera muestra */
   uint16_t         odr;     /* Hz */
   uint8_t          flags;   /* TRAMA_FLAG_* */
   uint8_t          cant;    /* muestras cargadas */
@@ -132,23 +118,29 @@ _Static_assert(2U * (sizeof(block_t) + TRAMA_EXTRA) <= TX_BATCH_SIZE, "no entran
 _Static_assert(TEXT_MAX + TRAMA_EXTRA <= USB_LINK_MAX_WRITE, "la trama de texto no entra en un envio");
 
 /* ---- Estado --------------------------------------------------------------- */
-static i2c_ctx_t        i2c_ctx = { &hi2c1, 0 };
 static adxl345_t        sensor;
 static adxl345_status_t sensor_status = ADXL345_ERR_BUS;
 static adxl345_rate_t   app_rate = APP_RATE_DEFAULT;
 static adxl345_range_t  app_range = APP_RANGE_DEFAULT;
 
-/* Compartido con las interrupciones (EXTI e I2C) */
+/* Compartido con las interrupciones (EXTI y DMA del SPI) */
 static volatile bool     sampling;        /* true = las interrupciones pueden leer */
-static volatile bool     rx_busy;         /* hay una lectura I2C en curso */
+static volatile bool     rx_busy;         /* el bus esta reservado (lote o chequeo) */
 static volatile bool     bus_lost;        /* demasiados errores seguidos */
-static volatile uint32_t t_last_read;     /* HAL_GetTick() de la ultima lectura completa */
-static volatile uint32_t read_t_us;       /* hora del flanco de la lectura en curso */
-static uint8_t           rx_block[ADXL345_BLOCK_LEN];
+static volatile uint32_t t_last_read;     /* HAL_GetTick() del ultimo lote completo */
 
-/* Bloques: la interrupcion I2C carga el bloque blocks[head] y al cerrarlo
-   avanza head; app_loop manda desde tail. Un bloque recien es visible para
-   app_loop cuando esta cerrado. */
+/* Lote en curso: muestras leidas del FIFO en un aviso de INT1 */
+static volatile uint32_t batch_t_us;      /* hora del flanco (o del inicio, sin flanco) */
+static volatile uint8_t  batch_count;     /* muestras a leer */
+static volatile uint8_t  batch_idx;       /* proxima a leer */
+static volatile uint8_t  batch_ref;       /* indice de la muestra que corresponde a batch_t_us */
+static volatile bool     batch_overrun;   /* el FIFO estaba lleno: faltan muestras antes */
+static uint32_t          period_ns;       /* periodo nominal */
+static uint32_t          stall_ms;        /* sin lotes por mas que esto con INT1 en alto = stall */
+
+/* Bloques: las interrupciones cargan blocks[head] y al cerrarlo avanzan
+   head; app_loop manda desde tail. Un bloque recien es visible para app_loop
+   cuando esta cerrado. */
 static block_t           blocks[BLOCK_COUNT];
 static volatile uint32_t blk_head;
 static volatile uint32_t blk_tail;
@@ -161,7 +153,7 @@ static uint32_t          last_t_us;
 
 static volatile uint32_t n_samples;       /* muestras leidas; es el indice que se envia */
 static volatile uint32_t n_overrun;
-static volatile uint32_t n_i2c_err;
+static volatile uint32_t n_bus_err;
 static volatile uint32_t n_buf_full;
 static volatile uint32_t n_gap;
 static volatile uint32_t n_settle;        /* muestras descartadas por asentamiento */
@@ -174,7 +166,7 @@ static uint32_t int1_edges_prev;
 static uint32_t n_samples_prev;
 static uint32_t st_int1, st_sps, st_tmin_us, st_tmax_us;   /* ultimo segundo completo */
 
-/* Periodo entre flancos de INT1 medido con el contador de ciclos (DWT), que
+/* Intervalo entre flancos de INT1 medido con el contador de ciclos (DWT), que
    corre con el reloj del micro (cristal de 25 MHz). Min y max por segundo. */
 static volatile uint32_t edge_cyc_prev;
 static volatile bool     edge_have_prev;
@@ -198,8 +190,7 @@ static uint32_t t_status;
 static uint32_t t_retry;
 static uint32_t t_blink;
 
-/* SDO a GND -> 0x53, SDO a VCC -> 0x1D */
-static const uint8_t ADDR_CANDIDATES[] = { 0x53, 0x1D };
+static const adxl345_bus_t spi_bus = { sensor_spi_read, sensor_spi_write, NULL };
 
 /* ---- Reloj en us ---------------------------------------------------------- */
 
@@ -219,7 +210,7 @@ static uint32_t clock_us(void)
   return us;
 }
 
-/* ---- Bloques (los llama la interrupcion I2C, o app_loop con el muestreo
+/* ---- Bloques (los llaman las interrupciones, o app_loop con el muestreo
         detenido) ---------------------------------------------------------- */
 
 static void close_block(void)
@@ -267,7 +258,7 @@ static void store_sample(const adxl345_sample_t *s, uint32_t t_us, bool overrun)
 
 /* Empieza de cero: sin bloques pendientes y sin muestra anterior (asi el
    salto de tiempo de un start o de un cambio de ODR no cuenta como hueco).
-   Solo con el muestreo detenido. */
+   Solo con el muestreo detenido o sin interrupciones. */
 static void reset_blocks(uint8_t next_flags)
 {
   blk_open = false;
@@ -277,10 +268,10 @@ static void reset_blocks(uint8_t next_flags)
   have_last = false;
 }
 
-/* ---- Lectura por interrupcion -------------------------------------------- */
+/* ---- Lectura del FIFO por DMA --------------------------------------------- */
 
-/* Reserva el bus para una lectura. Puede llamarse desde la EXTI o desde
-   app_loop, por eso la consulta y la marca se hacen sin interrupciones. */
+/* Reserva el bus. Puede llamarse desde la EXTI, desde el fin de un lote o
+   desde app_loop, por eso la consulta y la marca se hacen sin interrupciones. */
 static bool claim_bus(void)
 {
   bool ok;
@@ -298,69 +289,108 @@ static bool claim_bus(void)
 
 static void read_error(void)
 {
-  n_i2c_err++;
+  n_bus_err++;
   if (++consecutive_err >= MAX_CONSECUTIVE_ERR)
   {
     bus_lost = true;                   /* app_loop vuelve a buscar el sensor */
   }
 }
 
-static void start_read(uint32_t t_us)
+static void on_fifo_status(const uint8_t *data, uint16_t len);
+static void on_sample(const uint8_t *data, uint16_t len);
+
+/* Empieza un lote. from_edge: lo lanzo un flanco de INT1 (t_us es la hora de
+   la muestra FIFO_WATERMARK - 1); si no, t_us es la hora de la ultima. */
+static void start_batch(uint32_t t_us, bool from_edge)
 {
   if (!claim_bus())
   {
     return;
   }
-  read_t_us = t_us;
-  if (HAL_I2C_Mem_Read_IT(&hi2c1, i2c_ctx.addr, ADXL345_BLOCK_REG, I2C_MEMADD_SIZE_8BIT,
-                          rx_block, ADXL345_BLOCK_LEN) != HAL_OK)
+  batch_t_us = t_us;
+  batch_ref = from_edge ? (uint8_t)(FIFO_WATERMARK - 1U) : 0xFFU;
+  if (!sensor_spi_read_async(ADXL345_REG_FIFO_STATUS, 1U, on_fifo_status))
   {
     rx_busy = false;
     read_error();
   }
 }
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+/* Suelta el bus. Si INT1 sigue en alto (el watermark es por nivel: no habra
+   otro flanco) se lanza otro lote enseguida. */
+static void release_bus(void)
 {
-  if (GPIO_Pin == ADXL_INT1_Pin)
+  rx_busy = false;
+  if (sampling && (HAL_GPIO_ReadPin(ADXL_INT1_GPIO_Port, ADXL_INT1_Pin) == GPIO_PIN_SET))
   {
-    uint32_t now = DWT->CYCCNT;
-
-    if (edge_have_prev)
-    {
-      uint32_t period = now - edge_cyc_prev;
-      if (period < period_min_cyc) period_min_cyc = period;
-      if (period > period_max_cyc) period_max_cyc = period;
-    }
-    edge_cyc_prev = now;
-    edge_have_prev = true;
-
-    n_int1_edges++;
-    start_read(clock_us());
+    start_batch(clock_us(), false);
   }
 }
 
-void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
+static void on_fifo_status(const uint8_t *data, uint16_t len)
 {
-  adxl345_sample_t s;
-  uint8_t src;
-  uint32_t t;
+  uint8_t entries;
 
-  if (hi2c != &hi2c1)
+  (void)len;
+  if (data == NULL)
   {
+    rx_busy = false;
+    read_error();
     return;
   }
-
-  src = adxl345_parse_block(rx_block, &s);
-  if ((src & ADXL345_INT_OVERRUN) != 0U)
+  entries = (uint8_t)(data[0] & 0x3FU);
+  if (entries > ADXL345_FIFO_MAX_ENTRIES)
   {
-    n_overrun++;                       /* se perdio al menos una muestra */
+    rx_busy = false;                   /* imposible: lectura corrupta */
+    read_error();
+    return;
   }
+  if (entries == 0U)
+  {
+    t_last_read = HAL_GetTick();
+    release_bus();
+    return;
+  }
+  batch_overrun = (entries >= ADXL345_FIFO_SIZE);
+  if (batch_overrun)
+  {
+    n_overrun++;                       /* el FIFO se lleno: se perdieron muestras */
+  }
+  if (batch_ref == 0xFFU)
+  {
+    batch_ref = (uint8_t)(entries - 1U);   /* sin flanco: la ultima es de ahora */
+  }
+  batch_count = entries;
+  batch_idx = 0;
+  if (!sensor_spi_read_async(ADXL345_REG_DATAX0, ADXL345_DATA_LEN, on_sample))
+  {
+    rx_busy = false;
+    read_error();
+  }
+}
 
-  /* Hueco: el bloque en curso se cierra para que cada bloque tenga solo
-     muestras contiguas, y el siguiente lleva la marca. */
-  t = read_t_us;
-  if (have_last && ((t - last_t_us) > gap_limit_us))
+static void on_sample(const uint8_t *data, uint16_t len)
+{
+  adxl345_sample_t s;
+  uint32_t t;
+  uint8_t idx = batch_idx;
+
+  (void)len;
+  if (data == NULL)
+  {
+    rx_busy = false;
+    read_error();
+    return;
+  }
+  adxl345_decode_xyz(data, &s);
+  /* En ns y dividiendo al final: a 3200 Hz el periodo es 312,5 us y redondearlo
+     antes perderia 0,5 us por muestra. Entra en 32 bits: 33 x 10 ms (100 Hz). */
+  t = batch_t_us + (uint32_t)((((int32_t)idx - (int32_t)batch_ref) * (int32_t)period_ns) / 1000);
+
+  /* Hueco: mas de 1,5 periodos desde la muestra anterior, o FIFO lleno (no
+     se sabe cuantas faltan; la PC lo calcula con t0). El bloque en curso se
+     cierra para que cada bloque tenga solo muestras contiguas. */
+  if (have_last && ((((int32_t)(t - last_t_us)) > (int32_t)gap_limit_us) || (batch_overrun && (idx == 0U))))
   {
     n_gap++;
     close_block();
@@ -380,34 +410,50 @@ void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
   }
   else
   {
-    store_sample(&s, t, (src & ADXL345_INT_OVERRUN) != 0U);
+    store_sample(&s, t, batch_overrun && (idx == 0U));
     n_samples++;
   }
 
-  consecutive_err = 0;
-  t_last_read = HAL_GetTick();
-  rx_busy = false;
-}
-
-void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
-{
-  if (hi2c != &hi2c1)
+  batch_idx = (uint8_t)(idx + 1U);
+  if (batch_idx < batch_count)
   {
+    if (!sensor_spi_read_async(ADXL345_REG_DATAX0, ADXL345_DATA_LEN, on_sample))
+    {
+      rx_busy = false;
+      read_error();
+    }
     return;
   }
-  rx_busy = false;
-  read_error();
+  consecutive_err = 0;
+  t_last_read = HAL_GetTick();
+  release_bus();
 }
 
-/* Red de seguridad: DATA_READY es por nivel. Si una lectura falla, INT1 queda
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == ADXL_INT1_Pin)
+  {
+    uint32_t now = DWT->CYCCNT;
+
+    if (edge_have_prev)
+    {
+      uint32_t period = now - edge_cyc_prev;
+      if (period < period_min_cyc) period_min_cyc = period;
+      if (period > period_max_cyc) period_max_cyc = period;
+    }
+    edge_cyc_prev = now;
+    edge_have_prev = true;
+
+    n_int1_edges++;
+    start_batch(clock_us(), true);
+  }
+}
+
+/* Red de seguridad: el watermark es por nivel. Si un lote falla, INT1 queda
    en alto, no hay mas flancos y el muestreo se detiene. Aca se detecta y se
-   relanza la lectura. */
+   relanza. */
 static void check_stall(uint32_t now)
 {
-  /* Se perdio un flanco si INT1 esta en alto sin lectura en curso y no se
-     completo ninguna lectura en dos periodos (mas un margen). */
-  uint32_t stall_ms = 2U * 1000U / adxl345_rate_hz(app_rate) + 2U;
-
   if (!rx_busy &&
       (HAL_GPIO_ReadPin(ADXL_INT1_GPIO_Port, ADXL_INT1_Pin) == GPIO_PIN_SET) &&
       /* con signo: la interrupcion puede haber escrito t_last_read despues
@@ -416,8 +462,29 @@ static void check_stall(uint32_t now)
   {
     n_stall++;
     t_last_read = now;                 /* un relanzamiento por periodo de espera */
-    start_read(clock_us());
+    start_batch(clock_us(), false);
   }
+}
+
+/* SPI no tiene acuse de recibo: un sensor desconectado se lee como datos.
+   Una vez por segundo se confirma que sigue ahi. */
+static void check_devid(void)
+{
+  uint8_t devid = 0;
+  int st;
+
+  if (!claim_bus())
+  {
+    return;                            /* hay un lote en curso: en el proximo segundo */
+  }
+  st = sensor_spi_read(NULL, ADXL345_REG_DEVID, &devid, 1U);
+  if ((st != 0) || (devid != ADXL345_DEVID_VALUE))
+  {
+    sensor.devid = devid;
+    n_bus_err++;
+    bus_lost = true;                   /* app_loop detiene y vuelve a buscar el sensor */
+  }
+  release_bus();
 }
 
 /* ---- Conexion con el sensor ---------------------------------------------- */
@@ -428,65 +495,51 @@ static void stop_sampling(void)
 
   HAL_NVIC_DisableIRQ(ADXL_INT1_EXTI_IRQn);
   sampling = false;
-  while (rx_busy && ((HAL_GetTick() - t0) < I2C_TIMEOUT_MS))
+  while (rx_busy && ((HAL_GetTick() - t0) < STOP_TIMEOUT_MS))
   {
-    /* espera a que termine la lectura en curso */
+    /* espera a que termine el lote en curso (menos de 1 ms) */
   }
-  rx_busy = false;   /* si no termino, sensor_connect reinicia el I2C */
+  if (rx_busy)
+  {
+    sensor_spi_abort();
+  }
+  rx_busy = false;
 }
 
 static void start_sampling(void)
 {
-  adxl345_sample_t dummy;
+  uint32_t hz = adxl345_rate_hz(app_rate);
 
-  /* Se borra un flanco viejo y se lee la muestra pendiente para que INT1
-     baje: asi el proximo flanco corresponde a una muestra nueva. Si llega
-     una muestra antes de habilitar la EXTI, su flanco queda pendiente y se
-     atiende al habilitarla. */
-  __HAL_GPIO_EXTI_CLEAR_IT(ADXL_INT1_Pin);
-  (void)adxl345_read_xyz(&sensor, &dummy);
-
-  blk_odr = (uint16_t)adxl345_rate_hz(app_rate);
-  gap_limit_us = 1500000U / blk_odr;
+  blk_odr = (uint16_t)hz;
+  period_ns = 1000000000U / hz;
+  gap_limit_us = 1500000U / hz;
+  stall_ms = 2U * FIFO_WATERMARK * 1000U / hz + 2U;
   settle_skip = SETTLE_SAMPLES;        /* el sensor se acaba de configurar */
 
   consecutive_err = 0;
   bus_lost = false;
   edge_have_prev = false;
   t_last_read = HAL_GetTick();
+  /* start_fifo dejo el FIFO vacio (INT1 en bajo): se borra un flanco viejo */
+  __HAL_GPIO_EXTI_CLEAR_IT(ADXL_INT1_Pin);
   sampling = true;
   HAL_NVIC_EnableIRQ(ADXL_INT1_EXTI_IRQn);
 }
 
 static void sensor_connect(void)
 {
-  const adxl345_bus_t bus = { i2c_read, i2c_write, &i2c_ctx };
-
-  for (uint32_t i = 0; i < sizeof(ADDR_CANDIDATES); i++)
+  sensor_status = adxl345_init(&sensor, &spi_bus, app_rate, app_range);
+  if (sensor_status == ADXL345_OK)
   {
-    i2c_ctx.addr = (uint16_t)(ADDR_CANDIDATES[i] << 1);
-    sensor_status = adxl345_init(&sensor, &bus, app_rate, app_range);
-    if (sensor_status == ADXL345_OK)
-    {
-      sensor_status = adxl345_enable_data_ready_int1(&sensor);
-    }
-    if (sensor_status != ADXL345_ERR_BUS)
-    {
-      break;    /* respondio algo en esta direccion: no se sigue probando */
-    }
+    sensor_status = adxl345_start_fifo(&sensor, FIFO_WATERMARK);
   }
-
-  if (sensor_status == ADXL345_ERR_BUS)
-  {
-    /* Un corte a mitad de una transferencia puede dejar el I2C trabado en
-       BUSY; reiniciar el periferico lo destraba para el proximo intento. */
-    n_i2c_err++;
-    HAL_I2C_DeInit(&hi2c1);
-    HAL_I2C_Init(&hi2c1);
-  }
-  else if (sensor_status == ADXL345_OK)
+  if (sensor_status == ADXL345_OK)
   {
     start_sampling();
+  }
+  else
+  {
+    n_bus_err++;
   }
 }
 
@@ -565,7 +618,7 @@ static const char *status_text(adxl345_status_t st)
 {
   switch (st)
   {
-    case ADXL345_ERR_BUS:    return "sin_respuesta_i2c";
+    case ADXL345_ERR_BUS:    return "error_spi";
     case ADXL345_ERR_DEVID:  return "devid_incorrecto";
     case ADXL345_ERR_VERIFY: return "registro_no_verifica";
     default:                 return "ok";
@@ -621,11 +674,12 @@ static void send_status(void)
   if (sensor_status == ADXL345_OK)
   {
     send_text(TRAMA_ESTADO,
-              "estado=OK etapa=%d addr=0x%02X devid=0x%02X odr=%lu rango=%u n=%lu ovr=%lu i2c_err=%lu drop=%lu stall=%lu bfull=%lu hueco=%lu asent=%lu int1=%lu sps=%lu tmin=%lu tmax=%lu",
-              APP_STAGE, (unsigned)(i2c_ctx.addr >> 1), sensor.devid,
+              "estado=OK etapa=%d bus=spi devid=0x%02X odr=%lu rango=%u fifo=%u n=%lu ovr=%lu bus_err=%lu drop=%lu stall=%lu bfull=%lu hueco=%lu asent=%lu int1=%lu sps=%lu tmin=%lu tmax=%lu",
+              APP_STAGE, sensor.devid,
               (unsigned long)adxl345_rate_hz(app_rate), 2U << (unsigned)app_range,
+              (unsigned)FIFO_WATERMARK,
               (unsigned long)n_samples, (unsigned long)n_overrun,
-              (unsigned long)n_i2c_err, (unsigned long)n_drop,
+              (unsigned long)n_bus_err, (unsigned long)n_drop,
               (unsigned long)n_stall, (unsigned long)n_buf_full, (unsigned long)n_gap,
               (unsigned long)n_settle,
               (unsigned long)st_int1, (unsigned long)st_sps,
@@ -633,9 +687,9 @@ static void send_status(void)
   }
   else
   {
-    send_text(TRAMA_ESTADO, "estado=ERROR etapa=%d causa=%s devid=0x%02X i2c_err=%lu",
+    send_text(TRAMA_ESTADO, "estado=ERROR etapa=%d bus=spi causa=%s devid=0x%02X bus_err=%lu",
               APP_STAGE, status_text(sensor_status), sensor.devid,
-              (unsigned long)n_i2c_err);
+              (unsigned long)n_bus_err);
   }
 }
 
@@ -671,7 +725,7 @@ static void cmd_start(void)
   restart_rates();                     /* el proximo estado cubre 1 s desde start */
 }
 
-/* "odr=<Hz>": reconfigura el sensor con otro ODR (100 a 800 Hz). */
+/* "odr=<Hz>": reconfigura el sensor con otro ODR (100 a 3200 Hz). */
 static void cmd_odr(unsigned long hz)
 {
   for (adxl345_rate_t r = ADXL345_RATE_100HZ; r <= APP_RATE_MAX; r++)
@@ -691,7 +745,7 @@ static void cmd_odr(unsigned long hz)
       return;
     }
   }
-  send_text(TRAMA_RESPUESTA, "odr=%lu no_valido (100, 200, 400 u 800)", hz);
+  send_text(TRAMA_RESPUESTA, "odr=%lu no_valido (100, 200, 400, 800, 1600 o 3200)", hz);
 }
 
 /* "rango=<g>": reconfigura el sensor con otro rango (2, 4, 8 o 16 g). A
@@ -752,7 +806,8 @@ static void process_commands(void)
 
 void app_init(void)
 {
-  /* Contador de ciclos: periodo entre flancos de INT1 y reloj en us */
+  /* Contador de ciclos: intervalo entre flancos de INT1, reloj en us y la
+     espera de CS en alto de sensor_spi */
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   DWT->CYCCNT = 0;
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
@@ -760,6 +815,7 @@ void app_init(void)
   cyc_per_us = SystemCoreClock / 1000000U;
   clk_cyc_prev = DWT->CYCCNT;
 
+  sensor_spi_init();
   reset_blocks(0);
   sensor_connect();
   t_status = t_retry = t_blink = HAL_GetTick();
@@ -808,6 +864,10 @@ void app_loop(void)
     t_status = now;
     (void)clock_us();                  /* el reloj en us no se atrasa aunque no haya flancos */
     update_rates();
+    if (sensor_status == ADXL345_OK)
+    {
+      check_devid();                   /* SPI no avisa si el sensor se desconecta */
+    }
     if (streaming)
     {
       send_status();

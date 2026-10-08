@@ -8,6 +8,9 @@
 #define POWER_CTL_MEASURE     0x08
 #define DATA_FORMAT_FULL_RES  0x08
 #define FIFO_CTL_BYPASS       0x00
+#define FIFO_CTL_STREAM       0x80
+#define FIFO_CTL_SAMPLES_MASK 0x1F
+#define FIFO_STATUS_ENTRIES   0x3F
 
 static adxl345_status_t rd(adxl345_t *dev, uint8_t reg, uint8_t *buf, uint16_t len)
 {
@@ -64,13 +67,41 @@ adxl345_status_t adxl345_init(adxl345_t *dev, const adxl345_bus_t *bus,
   return wr_verify(dev, ADXL345_REG_POWER_CTL, POWER_CTL_MEASURE);
 }
 
-adxl345_status_t adxl345_enable_data_ready_int1(adxl345_t *dev)
+adxl345_status_t adxl345_start_fifo(adxl345_t *dev, uint8_t samples)
 {
+  adxl345_status_t st;
+
+  if ((samples == 0U) || (samples >= ADXL345_FIFO_SIZE))
+  {
+    return ADXL345_ERR_VERIFY;   /* 0 dispara el watermark siempre; 32 nunca deja margen */
+  }
+
+  st = wr_verify(dev, ADXL345_REG_POWER_CTL, POWER_CTL_STANDBY);
+  if (st != ADXL345_OK) return st;
+  st = wr_verify(dev, ADXL345_REG_INT_ENABLE, 0x00);
+  if (st != ADXL345_OK) return st;
+  /* Pasar por bypass vacia el FIFO: no quedan muestras de antes del cambio */
+  st = wr_verify(dev, ADXL345_REG_FIFO_CTL, FIFO_CTL_BYPASS);
+  if (st != ADXL345_OK) return st;
+  st = wr_verify(dev, ADXL345_REG_FIFO_CTL,
+                 (uint8_t)(FIFO_CTL_STREAM | (samples & FIFO_CTL_SAMPLES_MASK)));
+  if (st != ADXL345_OK) return st;
   /* INT_MAP: bit en 0 = esa interrupcion sale por INT1. Se mapea antes de
      habilitar para que nunca aparezca por INT2. */
-  adxl345_status_t st = wr_verify(dev, ADXL345_REG_INT_MAP, 0x00);
+  st = wr_verify(dev, ADXL345_REG_INT_MAP, 0x00);
   if (st != ADXL345_OK) return st;
-  return wr_verify(dev, ADXL345_REG_INT_ENABLE, ADXL345_INT_DATA_READY);
+  st = wr_verify(dev, ADXL345_REG_INT_ENABLE, ADXL345_INT_WATERMARK);
+  if (st != ADXL345_OK) return st;
+  return wr_verify(dev, ADXL345_REG_POWER_CTL, POWER_CTL_MEASURE);
+}
+
+adxl345_status_t adxl345_read_fifo_entries(adxl345_t *dev, uint8_t *entries)
+{
+  uint8_t v = 0;
+  adxl345_status_t st = rd(dev, ADXL345_REG_FIFO_STATUS, &v, 1);
+
+  *entries = (uint8_t)(v & FIFO_STATUS_ENTRIES);
+  return st;
 }
 
 adxl345_status_t adxl345_read_int_source(adxl345_t *dev, uint8_t *int_source)
@@ -79,7 +110,7 @@ adxl345_status_t adxl345_read_int_source(adxl345_t *dev, uint8_t *int_source)
 }
 
 /* 16 bits en complemento a 2, byte bajo primero */
-static void decode_xyz(const uint8_t *d, adxl345_sample_t *out)
+void adxl345_decode_xyz(const uint8_t *d, adxl345_sample_t *out)
 {
   out->x = (int16_t)(((uint16_t)d[1] << 8) | d[0]);
   out->y = (int16_t)(((uint16_t)d[3] << 8) | d[2]);
@@ -93,16 +124,9 @@ adxl345_status_t adxl345_read_xyz(adxl345_t *dev, adxl345_sample_t *out)
 
   if (st == ADXL345_OK)
   {
-    decode_xyz(d, out);
+    adxl345_decode_xyz(d, out);
   }
   return st;
-}
-
-uint8_t adxl345_parse_block(const uint8_t *block, adxl345_sample_t *out)
-{
-  /* block[0] = INT_SOURCE, block[1] = DATA_FORMAT, block[2..7] = datos */
-  decode_xyz(&block[ADXL345_REG_DATAX0 - ADXL345_BLOCK_REG], out);
-  return block[0];
 }
 
 uint32_t adxl345_rate_hz(adxl345_rate_t rate)
