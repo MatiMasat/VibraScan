@@ -192,6 +192,10 @@ static uint32_t t_blink;
 
 static const adxl345_bus_t spi_bus = { sensor_spi_read, sensor_spi_write, NULL };
 
+/* Diagnostico por SWD (ver check_devid) */
+volatile uint8_t diag_fifo_status;
+volatile uint8_t diag_int_source;
+
 /* ---- Reloj en us ---------------------------------------------------------- */
 
 static uint32_t clock_us(void)
@@ -483,6 +487,14 @@ static void check_devid(void)
     sensor.devid = devid;
     n_bus_err++;
     bus_lost = true;                   /* app_loop detiene y vuelve a buscar el sensor */
+  }
+  else
+  {
+    /* Diagnostico (se lee por SWD): cuantas muestras tiene el FIFO y si el
+       watermark esta activo adentro del sensor. Separa "el sensor no avisa"
+       de "INT1 no llega a PB0". Leer INT_SOURCE no borra el watermark. */
+    (void)sensor_spi_read(NULL, ADXL345_REG_FIFO_STATUS, (uint8_t *)&diag_fifo_status, 1U);
+    (void)sensor_spi_read(NULL, ADXL345_REG_INT_SOURCE, (uint8_t *)&diag_int_source, 1U);
   }
   release_bus();
 }
