@@ -356,7 +356,7 @@ def main():
     parser.add_argument("--fs", type=float, default=800.0,
                         help="Tasa de muestreo hasta recibir la primera linea de estado (default: 800)")
     parser.add_argument("--odr", type=int, default=None, metavar="HZ",
-                        help="Cambia el ODR del sensor al arrancar: 100, 200, 400 u 800")
+                        help="Cambia el ODR del sensor al arrancar: 100, 200, 400, 800, 1600 o 3200")
     parser.add_argument("--rango", type=int, choices=(2, 4, 8, 16), default=None,
                         help="Cambia el rango del sensor al arrancar, en g")
     parser.add_argument("--no-csv", action="store_true", help="No guarda las muestras crudas")

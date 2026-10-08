@@ -30,7 +30,8 @@ import vibrascan_proto as vp
 from etapa2_prueba import (G_PER_LSB, GRAVITY_TOLERANCE, PERIOD_TOLERANCE, RATE_TOLERANCE,
                            list_ports)
 
-COUNTERS = ("ovr", "i2c_err", "drop", "stall", "bfull", "hueco")
+COUNTERS = ("ovr", "bus_err", "drop", "stall", "bfull", "hueco")   # bus_err: i2c_err hasta la etapa 5
+FIFO_EXTRA = 3            # un lote del FIFO puede traer hasta 3 muestras mas que el watermark
 START_TIMEOUT_S = 3.0
 CAPTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "capturas")
 
@@ -180,16 +181,26 @@ def evaluate(cap):
         checks.append(("Tasa de muestreo", False, "captura muy corta para medirla"))
 
     # 5b) INT1 y periodo entre flancos (del firmware). Se descarta la primera
-    #     trama de estado: su segundo es anterior a start.
+    #     trama de estado: su segundo es anterior a start. Desde la etapa 6
+    #     INT1 avisa cada 'fifo' muestras (watermark del FIFO); cada lote puede
+    #     leer algunas muestras mas, asi que los avisos quedan un poco por
+    #     debajo de odr/fifo.
     steady = ok_statuses[1:]
+    fifo = int(steady[-1].get("fifo", 1)) if steady else 1
     int1 = [int(s["int1"]) for s in steady if "int1" in s]
     if int1:
         int1_rate = statistics.fmean(int1)
-        checks.append(("INT1 conectado", abs(int1_rate - odr) <= RATE_TOLERANCE * odr,
-                       f"{int1_rate:.1f} flancos/s en PB0"))
+        if fifo > 1:
+            lo, hi = odr / (fifo + FIFO_EXTRA), (1 + RATE_TOLERANCE) * odr / fifo
+            ok = lo <= int1_rate <= hi
+            detail = f"{int1_rate:.1f} avisos/s en PB0 (FIFO de a {fifo}: entre {lo:.1f} y {hi:.1f})"
+        else:
+            ok = abs(int1_rate - odr) <= RATE_TOLERANCE * odr
+            detail = f"{int1_rate:.1f} flancos/s en PB0"
+        checks.append(("INT1 conectado", ok, detail))
     periods = [(int(s["tmin"]), int(s["tmax"])) for s in steady if int(s.get("tmin", 0)) > 0]
     if periods and rate:
-        nominal_us = 1e6 / rate
+        nominal_us = 1e6 / rate * fifo     # intervalo esperado entre avisos de INT1
         tmin, tmax = min(p[0] for p in periods), max(p[1] for p in periods)
         checks.append(("Periodo estable",
                        tmax <= PERIOD_TOLERANCE * nominal_us and tmin >= nominal_us / PERIOD_TOLERANCE,

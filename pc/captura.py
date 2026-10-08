@@ -35,7 +35,7 @@ def main():
     dur.add_argument("--minutos", type=float, help="Duracion en minutos")
     dur.add_argument("--segundos", type=float, help="Duracion en segundos")
     parser.add_argument("--nota", default="", help="Texto libre que queda en el JSON")
-    parser.add_argument("--odr", type=int, choices=(100, 200, 400, 800), default=None)
+    parser.add_argument("--odr", type=int, choices=(100, 200, 400, 800, 1600, 3200), default=None)
     parser.add_argument("--rango", type=int, choices=(2, 4, 8, 16), default=None, help="Rango en g")
     parser.add_argument("--salida", default=None, help="Nombre base de los archivos (sin extension)")
     args = parser.parse_args()
