@@ -338,9 +338,13 @@ static void start_batch(uint32_t t_us, bool from_edge)
 }
 
 /* Suelta el bus. Si INT1 sigue en alto (el watermark es por nivel: no habra
-   otro flanco) se lanza otro lote enseguida. */
+   otro flanco) se lanza otro lote enseguida. Un flanco que llego durante el
+   lote es viejo (sus muestras ya se leyeron o se leen por continuidad): se
+   borra, si no se atenderia ahora como un aviso recien cumplido con la hora
+   corrida (etapa 6, tras reconectar INT1). */
 static void release_bus(void)
 {
+  __HAL_GPIO_EXTI_CLEAR_IT(ADXL_INT1_Pin);
   rx_busy = false;
   if (sampling && (HAL_GPIO_ReadPin(ADXL_INT1_GPIO_Port, ADXL_INT1_Pin) == GPIO_PIN_SET))
   {
@@ -391,7 +395,9 @@ static void on_fifo_status(const uint8_t *data, uint16_t len)
      - Sin muestra anterior (arranque) y sin flanco exacto: la ultima es de
        ahora. */
   {
-    bool exact = (batch_ref != 0xFFU) && !batch_overrun &&
+    /* Exacto: flanco de un aviso recien cumplido. Con menos de fifo_wm
+       muestras el flanco es viejo; con muchas mas, el FIFO estaba lleno. */
+    bool exact = (batch_ref != 0xFFU) && !batch_overrun && (entries >= fifo_wm) &&
                  (entries <= (uint8_t)(fifo_wm + BATCH_EXTRA_MAX));
 
     if (batch_overrun)
