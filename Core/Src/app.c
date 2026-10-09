@@ -81,7 +81,14 @@
 #define APP_RATE_MAX          ADXL345_RATE_3200HZ
 #define APP_RANGE_DEFAULT     ADXL345_RANGE_4G     /* se cambia con el comando rango= */
 
-#define FIFO_WM_DEFAULT       16U     /* muestras por aviso de INT1; se cambia con fifo= */
+#define FIFO_WM_DEFAULT       2U      /* muestras por aviso de INT1; se cambia con fifo= (ver abajo) */
+/* Medido en la etapa 6: si hay actividad en el SPI mientras el sensor
+   convierte una muestra, esa muestra sale desviada en Z (hasta ~140 mg a
+   3200 Hz). Cada muestra leida ocupa ~30 us de bus; el lote tiene que
+   terminar antes de la conversion siguiente (312 us a 3200 Hz). Con 8 o 16
+   por aviso no termina; con 1, 2 o 4 los datos salen limpios. 2 deja ~235 us
+   de margen ante demoras con la mitad de interrupciones que 1. No subir este
+   valor sin volver a medir (comando fifo=). */
 #define STOP_TIMEOUT_MS       10U
 #define STATUS_PERIOD_MS      1000U
 #define RETRY_PERIOD_MS       500U
