@@ -118,4 +118,4 @@ def snr_banda_db(x, fs, f_tono):
     amp = ve.amplitud_tono(f, p, i, ve.piso(p, df)[i])
     total = float(p.sum() * df)
     ruido = max(total - amp ** 2, 1e-30)
-    return 10 * np.log10(amp ** 2 / ruido), amp
+    return 10 * np.log10(max(amp ** 2, 1e-30) / ruido), amp   # amp = 0: tono bajo el piso

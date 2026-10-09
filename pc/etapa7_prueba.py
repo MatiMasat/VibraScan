@@ -136,9 +136,13 @@ def tono(cap, f_tono):
           f"y {ay * 1000:.2f} mg, e {ae * 1000:.2f} mg (rms)")
     checks.append(("Mejora de SNR en y (toda la banda)", sy - sx >= MEJORA_MIN_DB,
                    f"{sx:.1f} dB en la entrada -> {sy:.1f} dB en y ({sy - sx:+.1f} dB, min +{MEJORA_MIN_DB:.0f})"))
-    sup = 20 * np.log10(ax / ae) if ae else float("inf")
-    checks.append(("Tono fuera del residuo e", sup >= SUPRESION_MIN_DB,
-                   f"el tono queda {sup:.1f} dB mas bajo en e que en la entrada (min {SUPRESION_MIN_DB:.0f})"))
+    if ae > 0:
+        sup = 20 * np.log10(ax / ae)
+        detalle = f"el tono queda {sup:.1f} dB mas bajo en e que en la entrada (min {SUPRESION_MIN_DB:.0f})"
+    else:
+        sup = float("inf")
+        detalle = "en e el tono queda por debajo del piso de ruido (no se distingue)"
+    checks.append(("Tono fuera del residuo e", sup >= SUPRESION_MIN_DB, detalle))
 
     # Convergencia: amplitud de y en ventanas de 0,1 s desde el inicio del tramo
     yy = cap.filtro["y"][j_on:i1]          # desde que se prende el tono

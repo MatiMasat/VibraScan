@@ -114,12 +114,12 @@ class Captura:
         self.filtro_cfg = None          # configuracion del filtro (del estado)
         self.filtro_us_max = 0          # maximo de filt_us (CPU del filtro por segundo)
         self.filtro_bloques = 0
+        self.t_flush = self.t_meta = time.monotonic()
+        self._open(first=True)          # primero el puerto: si falla no queda un CSV vacio
         if base:
             os.makedirs(os.path.dirname(base) or ".", exist_ok=True)
             self.csv = open(base + ".csv", "w", encoding="ascii", newline="")
             self.csv.write("seg,n,t_s,x,y,z\n")
-        self.t_flush = self.t_meta = time.monotonic()
-        self._open(first=True)
 
     # ---- conexion -----------------------------------------------------------
 
