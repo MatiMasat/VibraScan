@@ -22,6 +22,11 @@
   *   - Una vez por segundo lee DEVID: SPI no tiene acuse de recibo, y un
   *     sensor desconectado se leeria como datos (0x00 o 0xFF) sin error.
   *   - Mientras manda, una trama de estado por segundo (texto).
+  *   - Etapa 7: el eje elegido pasa por el filtro adaptativo en tiempo real
+  *     (filtro_procesar() de filtro.c -> nlms_procesar() de nlms.c), en
+  *     send_samples(), una vez por muestra y en orden. La salida (parte
+  *     realzada y y residuo e, en g) va en una trama TRAMA_FILTRO por bloque,
+  *     detras de la trama de muestras. Ver docs/filtro_adaptativo.md.
   *
   * El unico reloj de muestreo sigue siendo el del ADXL345.
   *
@@ -56,6 +61,12 @@
   *             hueco real de unos ms y se informa como tal.
   *   fifo=<n>  muestras por aviso de INT1, 1 a 31 (por defecto FIFO_WM_DEFAULT).
   *             Reconfigura el sensor como rango=.
+  *   filtro=<nlms|off>  filtro adaptativo (por defecto nlms)
+  *   eje=<x|y|z>        eje que se filtra (por defecto z)
+  *   taps=<n>           coeficientes del NLMS, 1 a 64 (por defecto 32)
+  *   delta=<n>          retardo del ALE en muestras, 1 a 32 (por defecto 2)
+  *   mu=<n>             paso del NLMS en milesimas (por defecto 10 = 0,010)
+  *                      Cada cambio reinicia el filtro.
   *   spi=<kHz> cambia el reloj del SPI: 3000, 1500, 750 o 375 (por defecto
   *             3000). Para estudiar el acople de la lectura en la medicion;
   *             reconfigura el sensor como rango= (deja un hueco de unos ms).
@@ -71,12 +82,13 @@
 
 #include "main.h"
 #include "adxl345.h"
+#include "filtro.h"
 #include "sensor_spi.h"
 #include "trama.h"
 #include "usb_link.h"
 
 /* ---- Configuracion de la etapa ------------------------------------------ */
-#define APP_STAGE             6
+#define APP_STAGE             7
 #define APP_RATE_DEFAULT      ADXL345_RATE_800HZ   /* se cambia con el comando odr= */
 #define APP_RATE_MAX          ADXL345_RATE_3200HZ
 #define APP_RANGE_DEFAULT     ADXL345_RANGE_4G     /* se cambia con el comando rango= */
@@ -99,8 +111,9 @@
 #define BLOCK_SAMPLES         32U     /* muestras por bloque = por trama (10 ms a 3200 Hz) */
 #define BLOCK_COUNT           128U    /* bloques; potencia de 2 (4096 muestras, 1,3 s a 3200 Hz) */
 #define TX_BATCH_SIZE         512U    /* bytes por envio USB (<= USB_LINK_MAX_WRITE): 2 tramas */
-#define TEXT_MAX              288U    /* texto de estado o respuesta (el estado ocupa hasta 256) */
+#define TEXT_MAX              352U    /* texto de estado o respuesta (el estado ocupa hasta ~320) */
 #define SETTLE_SAMPLES        2U      /* muestras descartadas tras configurar el sensor */
+#define G_PER_LSB             0.0039f /* FULL_RES: 3,9 mg por cuenta en cualquier rango */
 
 _Static_assert(TX_BATCH_SIZE <= USB_LINK_MAX_WRITE, "TX_BATCH_SIZE mayor que lo que acepta usb_link");
 _Static_assert((BLOCK_COUNT & (BLOCK_COUNT - 1U)) == 0U, "BLOCK_COUNT debe ser potencia de 2");
@@ -128,6 +141,23 @@ _Static_assert(offsetof(block_t, t0) == 4U && offsetof(block_t, odr) == 8U &&
                offsetof(block_t, s) == BLOCK_HEADER_LEN, "block_t no coincide con la trama");
 _Static_assert(sizeof(block_t) == BLOCK_HEADER_LEN + 6U * BLOCK_SAMPLES, "block_t tiene relleno");
 _Static_assert(2U * (sizeof(block_t) + TRAMA_EXTRA) <= TX_BATCH_SIZE, "no entran 2 tramas por envio");
+
+/* Trama de filtro (etapa 7): por cada bloque, la salida del filtro de sus
+   muestras, en el mismo orden. Misma forma que el contenido de la trama. */
+typedef struct {
+  uint32_t n0;                    /* indice de la primera muestra (igual que el bloque) */
+  uint8_t  tipo;                  /* filtro_tipo_t */
+  uint8_t  eje;                   /* 0 = x, 1 = y, 2 = z */
+  uint8_t  flags;                 /* TRAMA_FILTRO_* */
+  uint8_t  cant;
+  float    ye[BLOCK_SAMPLES][2];  /* [i][0] = y (realzada), [i][1] = e (residuo), en g */
+} filt_trama_t;
+
+#define FILT_HEADER_LEN       8U
+_Static_assert(offsetof(filt_trama_t, ye) == FILT_HEADER_LEN, "filt_trama_t no coincide con la trama");
+_Static_assert(sizeof(filt_trama_t) == FILT_HEADER_LEN + 8U * BLOCK_SAMPLES, "filt_trama_t tiene relleno");
+_Static_assert(sizeof(block_t) + sizeof(filt_trama_t) + 2U * TRAMA_EXTRA <= TX_BATCH_SIZE,
+               "un bloque y su trama de filtro no entran en un envio");
 _Static_assert(TEXT_MAX + TRAMA_EXTRA <= USB_LINK_MAX_WRITE, "la trama de texto no entra en un envio");
 
 /* ---- Estado --------------------------------------------------------------- */
@@ -182,6 +212,20 @@ static uint32_t n_stall;
 static uint32_t int1_edges_prev;
 static uint32_t n_samples_prev;
 static uint32_t st_int1, st_sps, st_tmin_us, st_tmax_us;   /* ultimo segundo completo */
+
+/* Filtro adaptativo (etapa 7). Solo lo usa app_loop (send_samples). */
+static filtro_t      filt;
+static filtro_tipo_t filt_tipo = FILTRO_NLMS;
+static uint8_t       filt_eje = 2U;           /* z */
+static uint16_t      filt_taps = 32U;
+static uint16_t      filt_delta = 2U;
+static uint16_t      filt_mu_mil = 10U;       /* mu en milesimas */
+static bool          filt_reiniciar = true;   /* reiniciar antes del proximo bloque */
+static uint32_t      filt_next_n;             /* n que continua el ultimo bloque filtrado */
+static uint16_t      filt_odr;                /* ODR con el que se configuro */
+static uint32_t      filt_cyc;                /* ciclos de CPU del filtro en el segundo en curso */
+static uint32_t      st_filt_us;              /* us de CPU del filtro en el ultimo segundo */
+static filt_trama_t  filt_out;
 
 /* Intervalo entre flancos de INT1 medido con el contador de ciclos (DWT), que
    corre con el reloj del micro (cristal de 25 MHz). Min y max por segundo. */
@@ -631,6 +675,60 @@ static void sensor_connect(void)
 
 /* ---- Envio a la PC -------------------------------------------------------- */
 
+/* ---- Filtro adaptativo (etapa 7) ------------------------------------------ */
+
+/* Configura el filtro con los parametros actuales. Devuelve false si alguno
+   no es valido (el filtro queda apagado). */
+static bool filt_aplicar(void)
+{
+  int st = filtro_configurar(&filt, filt_tipo, (float)blk_odr, filt_taps, filt_delta,
+                             (float)filt_mu_mil / 1000.0f);
+
+  filt_odr = blk_odr;
+  filt_reiniciar = true;
+  if (st != 0)
+  {
+    filt_tipo = FILTRO_OFF;
+    (void)filtro_configurar(&filt, FILTRO_OFF, (float)blk_odr, 0U, 0U, 0.0f);
+  }
+  return st == 0;
+}
+
+/* Pasa por el filtro el eje elegido de las muestras de un bloque, una vez y
+   en orden, y deja el resultado en filt_out. Se reinicia ante una
+   discontinuidad: inicio, hueco, cambio de ODR o n que no continua (buffer
+   lleno); la trama lo avisa para que la PC haga lo mismo. */
+static void filtrar_bloque(const block_t *b)
+{
+  uint32_t c0 = DWT->CYCCNT;
+  uint32_t i;
+
+  if (b->odr != filt_odr)
+  {
+    (void)filt_aplicar();              /* el pasaaltos depende del ODR */
+  }
+  filt_out.flags = 0;
+  if (filt_reiniciar || ((b->flags & (TRAMA_FLAG_INICIO | TRAMA_FLAG_HUECO)) != 0U) ||
+      (b->n0 != filt_next_n))
+  {
+    filtro_reiniciar(&filt);
+    filt_out.flags = TRAMA_FILTRO_REINICIO;
+    filt_reiniciar = false;
+  }
+  filt_out.n0 = b->n0;
+  filt_out.tipo = (uint8_t)filt_tipo;
+  filt_out.eje = filt_eje;
+  filt_out.cant = b->cant;
+  for (i = 0; i < b->cant; i++)
+  {
+    const int16_t *s = &b->s[i].x;
+    float x_g = (float)s[filt_eje] * G_PER_LSB;
+    filt_out.ye[i][0] = filtro_procesar(&filt, x_g, &filt_out.ye[i][1]);
+  }
+  filt_next_n = b->n0 + b->cant;
+  filt_cyc += DWT->CYCCNT - c0;
+}
+
 /* Junta en tx_batch todas las tramas de bloques que entren (2 de 213 bytes)
    y las manda en un solo envio. Si el USB todavia esta ocupado con el envio
    anterior no se espera ni se descarta nada: los bloques quedan en el buffer
@@ -659,12 +757,20 @@ static void send_samples(void)
   {
     const block_t *b = &blocks[blk_tail & (BLOCK_COUNT - 1U)];
     uint16_t plen = (uint16_t)(BLOCK_HEADER_LEN + sizeof(adxl345_sample_t) * b->cant);
+    uint16_t flen = (filt_tipo != FILTRO_OFF) ?
+                    (uint16_t)(FILT_HEADER_LEN + 8U * b->cant + TRAMA_EXTRA) : 0U;
 
-    if ((len + plen + TRAMA_EXTRA) > sizeof(tx_batch))
+    if ((len + plen + TRAMA_EXTRA + flen) > sizeof(tx_batch))
     {
       break;                           /* el resto va en el proximo envio */
     }
     len += trama_armar(TRAMA_MUESTRAS, tx_seq++, b, plen, &tx_batch[len]);
+    if (filt_tipo != FILTRO_OFF)
+    {
+      filtrar_bloque(b);               /* etapa 7: filtro adaptativo en tiempo real */
+      len += trama_armar(TRAMA_FILTRO, tx_seq++, &filt_out, (uint16_t)(flen - TRAMA_EXTRA),
+                         &tx_batch[len]);
+    }
     samples += b->cant;
     blk_tail = blk_tail + 1U;
   }
@@ -738,6 +844,8 @@ static void update_rates(void)
   }
   st_tmin_us = pmin / cyc_per_us;
   st_tmax_us = pmax / cyc_per_us;
+  st_filt_us = filt_cyc / cyc_per_us;  /* filtro: solo lo toca app_loop, sin carreras */
+  filt_cyc = 0;
 }
 
 /* Empieza una ventana nueva de 1 s para int1, sps, tmin y tmax (con start y
@@ -760,7 +868,8 @@ static void send_status(void)
   if (sensor_status == ADXL345_OK)
   {
     send_text(TRAMA_ESTADO,
-              "estado=OK etapa=%d bus=spi spi=%lu devid=0x%02X odr=%lu rango=%u fifo=%u n=%lu ovr=%lu bus_err=%lu drop=%lu stall=%lu bfull=%lu hueco=%lu asent=%lu int1=%lu sps=%lu tmin=%lu tmax=%lu",
+              "estado=OK etapa=%d bus=spi spi=%lu devid=0x%02X odr=%lu rango=%u fifo=%u n=%lu ovr=%lu bus_err=%lu drop=%lu stall=%lu bfull=%lu hueco=%lu asent=%lu int1=%lu sps=%lu tmin=%lu tmax=%lu "
+              "filtro=%s eje=%c taps=%u delta=%u mu=%u filt_us=%lu",
               APP_STAGE, (unsigned long)sensor_spi_khz(), sensor.devid,
               (unsigned long)adxl345_rate_hz(app_rate), 2U << (unsigned)app_range,
               (unsigned)fifo_wm,
@@ -769,7 +878,10 @@ static void send_status(void)
               (unsigned long)n_stall, (unsigned long)n_buf_full, (unsigned long)n_gap,
               (unsigned long)n_settle,
               (unsigned long)st_int1, (unsigned long)st_sps,
-              (unsigned long)st_tmin_us, (unsigned long)st_tmax_us);
+              (unsigned long)st_tmin_us, (unsigned long)st_tmax_us,
+              (filt_tipo == FILTRO_NLMS) ? "nlms" : "off", "xyz"[filt_eje],
+              (unsigned)filt_taps, (unsigned)filt_delta, (unsigned)filt_mu_mil,
+              (unsigned long)st_filt_us);
   }
   else
   {
@@ -889,6 +1001,46 @@ static void cmd_spi(unsigned long khz)
   }
 }
 
+/* Comandos del filtro adaptativo (etapa 7). Cada cambio reconfigura y
+   reinicia el filtro; si el valor no es valido no se cambia nada. */
+static void cmd_filtro(const char *cmd)
+{
+  unsigned long v;
+  filtro_tipo_t tipo = filt_tipo;
+  uint8_t eje = filt_eje;
+  uint16_t taps = filt_taps, delta = filt_delta, mu = filt_mu_mil;
+  bool ok = true;
+
+  if (strcmp(cmd, "filtro=nlms") == 0)                     tipo = FILTRO_NLMS;
+  else if (strcmp(cmd, "filtro=off") == 0)                 tipo = FILTRO_OFF;
+  else if ((strncmp(cmd, "eje=", 4) == 0) && (cmd[4] >= 'x') && (cmd[4] <= 'z') && (cmd[5] == '\0'))
+                                                           eje = (uint8_t)(cmd[4] - 'x');
+  else if (sscanf(cmd, "taps=%lu", &v) == 1)               { ok = (v >= 1UL) && (v <= NLMS_MAX_TAPS); taps = (uint16_t)v; }
+  else if (sscanf(cmd, "delta=%lu", &v) == 1)              { ok = (v >= 1UL) && (v <= NLMS_MAX_DELTA); delta = (uint16_t)v; }
+  else if (sscanf(cmd, "mu=%lu", &v) == 1)                 { ok = (v >= 1UL) && (v <= 1999UL); mu = (uint16_t)v; }
+  else                                                     ok = false;
+
+  if (!ok)
+  {
+    send_text(TRAMA_RESPUESTA, "%s no_valido (filtro=nlms|off, eje=x|y|z, taps=1..64, delta=1..32, mu=1..1999 milesimas)", cmd);
+    return;
+  }
+  filt_tipo = tipo;
+  filt_eje = eje;
+  filt_taps = taps;
+  filt_delta = delta;
+  filt_mu_mil = mu;
+  (void)filt_aplicar();
+  send_text(TRAMA_RESPUESTA, "%s ok", cmd);
+}
+
+static bool es_cmd_filtro(const char *cmd)
+{
+  return (strncmp(cmd, "filtro=", 7) == 0) || (strncmp(cmd, "eje=", 4) == 0) ||
+         (strncmp(cmd, "taps=", 5) == 0) || (strncmp(cmd, "delta=", 6) == 0) ||
+         (strncmp(cmd, "mu=", 3) == 0);
+}
+
 static void process_commands(void)
 {
   char cmd[24];
@@ -911,6 +1063,10 @@ static void process_commands(void)
   else if (sscanf(cmd, "rango=%lu", &hz) == 1)
   {
     cmd_rango(hz);
+  }
+  else if (es_cmd_filtro(cmd))
+  {
+    cmd_filtro(cmd);
   }
   else if (sscanf(cmd, "fifo=%lu", &hz) == 1)
   {

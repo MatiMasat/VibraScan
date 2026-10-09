@@ -18,6 +18,10 @@
 #define TRAMA_MUESTRAS     1U
 #define TRAMA_ESTADO       2U   /* contenido: texto "estado=OK clave=valor ..." */
 #define TRAMA_RESPUESTA    3U   /* contenido: texto de respuesta a un comando */
+#define TRAMA_FILTRO       4U   /* contenido: salida del filtro adaptativo de un bloque (etapa 7) */
+
+/* Flags de la trama de filtro */
+#define TRAMA_FILTRO_REINICIO  0x01U   /* el filtro se reinicio antes de la primera muestra */
 
 /* Bytes que agrega la trama al contenido: sync + tipo + largo + seq + crc */
 #define TRAMA_EXTRA        9U
