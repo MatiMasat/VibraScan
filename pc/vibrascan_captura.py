@@ -110,6 +110,10 @@ class Captura:
         self.closed = False
 
         self.csv = None
+        self.csv_filtro = None          # <base>_filtro.csv, al llegar la primera trama de filtro
+        self.filtro_cfg = None          # configuracion del filtro (del estado)
+        self.filtro_us_max = 0          # maximo de filt_us (CPU del filtro por segundo)
+        self.filtro_bloques = 0
         if base:
             os.makedirs(os.path.dirname(base) or ".", exist_ok=True)
             self.csv = open(base + ".csv", "w", encoding="ascii", newline="")
@@ -194,12 +198,30 @@ class Captura:
 
         if fr.ftype == vp.TYPE_STATUS:
             self._status(vp.parse_fields(fr.payload.decode("ascii", errors="replace")))
+        elif fr.ftype == vp.TYPE_FILTRO:
+            fb = vp.parse_filtro(fr)
+            if fb is not None:
+                self._filtro(fb)
         elif fr.ftype == vp.TYPE_REPLY:
             self._event("respuesta", fr.payload.decode("ascii", errors="replace"))
         elif fr.ftype == vp.TYPE_SAMPLES:
             blk = vp.parse_block(fr)
             if blk is not None:
                 self._block(blk)
+
+    def _filtro(self, fb):
+        """Salida del filtro adaptativo del micro: una fila por muestra (n, y, e, reinicio)."""
+        self.filtro_bloques += 1
+        if not self.base:
+            return
+        if self.csv_filtro is None:
+            self.csv_filtro = open(self.base + "_filtro.csv", "w", encoding="ascii", newline="")
+            self.csv_filtro.write("n,y,e,reinicio\n")
+        rows = []
+        for i in range(len(fb.y)):
+            r = 1 if (i == 0 and fb.flags & vp.FILTRO_REINICIO) else 0
+            rows.append(f"{fb.n0 + i},{fb.y[i]:.9g},{fb.e[i]:.9g},{r}\n")
+        self.csv_filtro.write("".join(rows))
 
     def _status(self, st):
         self.status = st
@@ -215,6 +237,13 @@ class Captura:
             self.new_seg = self.new_seg or "rango"
         if rango:
             self.rango = rango
+        if "filtro" in st:
+            cfg = {k: st.get(k) for k in ("filtro", "eje", "taps", "delta", "mu")}
+            if self.filtro_cfg is not None and cfg != self.filtro_cfg:
+                self._event("filtro", " ".join(f"{k}={v}" for k, v in cfg.items()))
+            self.filtro_cfg = cfg
+            if st.get("filt_us", "").isdigit():
+                self.filtro_us_max = max(self.filtro_us_max, int(st["filt_us"]))
         tmin, tmax = int(st.get("tmin", 0) or 0), int(st.get("tmax", 0) or 0)
         if tmin > 0 and int(st.get("sps", 0) or 0) > 0:
             self.tmin = tmin if self.tmin is None else min(self.tmin, tmin)
@@ -259,6 +288,8 @@ class Captura:
         if self.csv and now - self.t_flush >= FLUSH_S:
             self.t_flush = now
             self.csv.flush()
+            if self.csv_filtro:
+                self.csv_filtro.flush()
         if self.base and now - self.t_meta >= META_S:
             self.t_meta = now
             self.write_meta()
@@ -320,6 +351,8 @@ class Captura:
             "perdidas": self.totals(),
             "contadores_firmware": {"inicio": self.counters_first,
                                     "fin": {k: self.status.get(k) for k in COUNTERS}},
+            "filtro": dict(self.filtro_cfg or {}, cpu_us_por_s_max=self.filtro_us_max,
+                           bloques=self.filtro_bloques) if self.filtro_cfg else None,
             "segmentos": self.segments,
             "eventos": self.events,
         }
@@ -342,4 +375,6 @@ class Captura:
         self.closed = True
         if self.csv:
             self.csv.close()
+        if self.csv_filtro:
+            self.csv_filtro.close()
         self.write_meta()

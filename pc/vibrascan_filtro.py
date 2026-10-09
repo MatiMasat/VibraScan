@@ -102,3 +102,20 @@ def nlms(x, taps=TAPS, delta=DELTA, mu=MU):
     f = Nlms(taps, delta, mu)
     out = np.array([f.procesar(float(v)) for v in x])
     return out[:, 0], out[:, 1]
+
+
+def snr_banda_db(x, fs, f_tono):
+    """Relacion senal/ruido de un tono en TODA la banda (0 a fs/2): potencia del
+    tono contra la potencia de todo lo demas. Es la medida que mejora un
+    realzador de lineas (ALE): deja pasar una banda angosta alrededor del tono
+    (~fs/taps de ancho) y saca el ruido del resto de la banda; una medida local
+    (pico sobre el piso de +/-20 Hz) no ve esa mejora. Devuelve (snr_db, amp_rms_g)."""
+    import vibrascan_espectro as ve
+    f, p, _ = ve.welch(x, fs)
+    df = f[1] - f[0]
+    i = int(round(f_tono / df))
+    i = i - 3 + int(np.argmax(p[i - 3:i + 4]))          # el pico verdadero, cerca
+    amp = ve.amplitud_tono(f, p, i, ve.piso(p, df)[i])
+    total = float(p.sum() * df)
+    ruido = max(total - amp ** 2, 1e-30)
+    return 10 * np.log10(amp ** 2 / ruido), amp

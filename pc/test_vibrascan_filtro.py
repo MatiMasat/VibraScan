@@ -70,8 +70,8 @@ class TestNlms(unittest.TestCase):
         x, tono = senal(20)
         y, e = vf.Filtro(vf.NLMS, FS).procesar_serie(x)
         k = int(5 * FS)                                  # ya convergio
-        mejora = snr_db(y[k:], 250) - snr_db(x[k:] - x[k:].mean(), 250)
-        print(f"\n  mejora de SNR en y: {mejora:.1f} dB")
+        mejora = vf.snr_banda_db(y[k:], FS, 250)[0] - vf.snr_banda_db(x[k:] - x[k:].mean(), FS, 250)[0]
+        print(f"\n  mejora de SNR en toda la banda en y: {mejora:.1f} dB")
         self.assertGreater(mejora, 6.0)
         # y se parece al tono verdadero mucho mas que la entrada
         err_y = np.sqrt(np.mean((y[k:] - tono[k:]) ** 2))

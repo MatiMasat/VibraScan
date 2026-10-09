@@ -35,6 +35,8 @@ import sys
 import time
 from dataclasses import dataclass, field
 
+import numpy as np
+
 SYNC = b"\xA5\x5A"
 HEADER = struct.Struct("<BHH")          # tipo, largo, seq (despues del sync)
 BLOCK_HEADER = struct.Struct("<IIHBB")  # n0, t0, odr, flags, cant
@@ -43,10 +45,13 @@ SAMPLE = struct.Struct("<hhh")
 TYPE_SAMPLES = 1
 TYPE_STATUS = 2
 TYPE_REPLY = 3
+TYPE_FILTRO = 4      # salida del filtro adaptativo de un bloque (etapa 7)
 
 FLAG_OVR = 0x01     # el sensor piso al menos una muestra de este bloque
 FLAG_GAP = 0x02     # antes de este bloque hubo un hueco (faltaron flancos de INT1)
 FLAG_FIRST = 0x04   # primer bloque desde "start"
+FILTRO_REINICIO = 0x01   # trama de filtro: se reinicio antes de la primera muestra
+FILTRO_HEADER = struct.Struct("<IBBBB")   # n0, tipo, eje, flags, cant
 
 BLOCK_SAMPLES = 32
 MAX_PAYLOAD = 1024  # una trama mas larga es un sync falso
@@ -90,6 +95,34 @@ class Block:
     odr: int
     flags: int
     samples: list   # [(x, y, z), ...] en cuentas
+
+
+@dataclass
+class FiltroBlock:
+    seq: int
+    n0: int
+    tipo: int       # 0 = off, 1 = nlms (filtro_tipo_t)
+    eje: int        # 0 = x, 1 = y, 2 = z
+    flags: int      # FILTRO_REINICIO
+    y: np.ndarray   # parte realzada, g
+    e: np.ndarray   # residuo, g
+
+
+def parse_filtro(frame):
+    """Trama de filtro -> FiltroBlock, o None si el contenido no es coherente."""
+    p = frame.payload
+    if len(p) < FILTRO_HEADER.size:
+        return None
+    n0, tipo, eje, flags, cant = FILTRO_HEADER.unpack_from(p)
+    if len(p) != FILTRO_HEADER.size + 8 * cant:
+        return None
+    ye = np.frombuffer(p, dtype="<f4", count=2 * cant, offset=FILTRO_HEADER.size).reshape(cant, 2)
+    return FiltroBlock(frame.seq, n0, tipo, eje, flags, ye[:, 0].astype(float), ye[:, 1].astype(float))
+
+
+def build_filtro_payload(n0, tipo, eje, flags, y, e):
+    ye = np.column_stack((y, e)).astype("<f4")
+    return FILTRO_HEADER.pack(n0 % T_MOD, tipo, eje, flags, len(y)) + ye.tobytes()
 
 
 def parse_block(frame):
@@ -324,6 +357,12 @@ def describe(frame, blk=None):
         x, y, z = blk.samples[0] if blk.samples else (0, 0, 0)
         return (f"seq={frame.seq} n0={blk.n0} t0={blk.t0 / 1e6:.6f} s odr={blk.odr} "
                 f"cant={len(blk.samples)} flags={flags} primera=({x},{y},{z})")
+    if frame.ftype == TYPE_FILTRO:
+        fb = parse_filtro(frame)
+        if fb is not None and len(fb.y):
+            return (f"seq={frame.seq} filtro n0={fb.n0} eje={'xyz'[fb.eje] if fb.eje < 3 else fb.eje} "
+                    f"cant={len(fb.y)}{' REINICIO' if fb.flags & FILTRO_REINICIO else ''} "
+                    f"y[0]={fb.y[0] * 1000:+.3f} mg e[0]={fb.e[0] * 1000:+.3f} mg")
     text = frame.payload.decode("ascii", errors="replace")
     kind = {TYPE_STATUS: "estado", TYPE_REPLY: "respuesta"}.get(frame.ftype, f"tipo {frame.ftype}")
     return f"seq={frame.seq} {kind}: {text}"

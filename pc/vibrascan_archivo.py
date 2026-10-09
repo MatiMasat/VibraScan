@@ -70,8 +70,16 @@ def cargar(path):
     data = np.loadtxt(base + ".csv", delimiter=",", skiprows=1, ndmin=2)
     if data.size == 0:
         data = np.zeros((0, 6))
-    return Captura(base, meta, data[:, 0].astype(np.int32), data[:, 1].astype(np.int64),
-                   data[:, 2], data[:, 3:6].astype(np.int32))
+    cap = Captura(base, meta, data[:, 0].astype(np.int32), data[:, 1].astype(np.int64),
+                  data[:, 2], data[:, 3:6].astype(np.int32))
+    # Salida del filtro adaptativo del micro (etapa 7), si la hay
+    cap.filtro = None
+    if os.path.exists(base + "_filtro.csv"):
+        f = np.loadtxt(base + "_filtro.csv", delimiter=",", skiprows=1, ndmin=2)
+        if f.size:
+            cap.filtro = {"n": f[:, 0].astype(np.int64), "y": f[:, 1], "e": f[:, 2],
+                          "reinicio": f[:, 3].astype(bool)}
+    return cap
 
 
 def saturadas(cap):
