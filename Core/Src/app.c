@@ -89,6 +89,7 @@
    por aviso no termina; con 1, 2 o 4 los datos salen limpios. 2 deja ~235 us
    de margen ante demoras con la mitad de interrupciones que 1. No subir este
    valor sin volver a medir (comando fifo=). */
+#define BATCH_EXTRA_MAX       3U      /* un lote normal trae a lo sumo el aviso + 3 muestras */
 #define STOP_TIMEOUT_MS       10U
 #define STATUS_PERIOD_MS      1000U
 #define RETRY_PERIOD_MS       500U
@@ -373,9 +374,14 @@ static void on_fifo_status(const uint8_t *data, uint16_t len)
   {
     n_overrun++;                       /* el FIFO se lleno: se perdieron muestras */
   }
-  if (batch_ref == 0xFFU)
+  /* Sin flanco, o con un flanco que no es un aviso recien cumplido (FIFO con
+     muchas mas muestras que el aviso: al reconectar INT1 o tras una demora
+     grande), la hora es la de la ultima muestra, que acaba de llegar. Si no,
+     las muestras viejas del FIFO quedarian con la hora corrida (etapa 6: al
+     reconectar INT1 un lote quedo 9 ms adelantado). */
+  if ((batch_ref == 0xFFU) || (entries > (uint8_t)(fifo_wm + BATCH_EXTRA_MAX)))
   {
-    batch_ref = (uint8_t)(entries - 1U);   /* sin flanco: la ultima es de ahora */
+    batch_ref = (uint8_t)(entries - 1U);
   }
   batch_count = entries;
   batch_idx = 0;

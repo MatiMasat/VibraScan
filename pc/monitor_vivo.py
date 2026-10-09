@@ -48,7 +48,7 @@ from vibrascan_captura import COUNTERS, G_PER_LSB, Captura
 RATE_TOLERANCE = 0.05   # sps puede diferir 5 % del ODR nominal
 EVENT_LABELS = {"seq": "TRAMA PERDIDA", "n": "DESCARTE", "hueco": "HUECO", "crc": "CRC",
                 "puerto_perdido": "PUERTO PERDIDO", "reconexion": "RECONEXION", "odr": "ODR",
-                "rango": "RANGO", "estado": "ESTADO NO OK", "inicio": "inicio",
+                "rango": "RANGO", "estado": "ESTADO NO OK", "inicio": "inicio", "tiempo": "TIEMPO",
                 "respuesta": "respuesta del firmware", "ovr": "OVERRUN"}
 
 AXES = (("X", "tab:blue"), ("Y", "tab:orange"), ("Z", "tab:green"))
@@ -282,6 +282,12 @@ class Reader(threading.Thread):
             self.freezes.append(time.monotonic() - self.frozen_since)
 
 
+def lista_huecos(holes, max_items=10):
+    """Duraciones de los primeros huecos y cuantos mas hubo."""
+    txt = ", ".join(f"{ms / 1000:.1f} s" for _, ms in holes[:max_items])
+    return txt + (f" y {len(holes) - max_items} mas" if len(holes) > max_items else "")
+
+
 def summarize(reader, log, window):
     """Resumen al cerrar y chequeo de lo que se puede medir de las 5 pruebas manuales."""
     r = reader
@@ -301,7 +307,7 @@ def summarize(reader, log, window):
     log.raw(f"  muestras descartadas en el micro: {c['descartadas_micro']}")
     log.raw(f"  reconexiones del USB: {c['reconexiones']}")
     log.raw(f"  huecos de INT1: {c['huecos']} (~{c['muestras_en_huecos']} muestras)"
-            + (": " + ", ".join(f"{ms / 1000:.1f} s" for _, ms in r.holes) if r.holes else ""))
+            + (": " + lista_huecos(r.holes) if r.holes else ""))
     log.raw(f"  cortes de datos: {len(r.freezes)}"
             + (f" (el mas largo {max(r.freezes):.2f} s)" if r.freezes else ""))
     if r.first_counters is not None:
@@ -336,7 +342,7 @@ def summarize(reader, log, window):
     recovered = bool(r.holes) and r.frozen_since is None
     check("4 Robustez INT1", recovered,
           f"{len(r.holes)} hueco(s) informado(s) por el firmware"
-          + (" (" + ", ".join(f"{ms / 1000:.1f} s" for _, ms in r.holes) + ")" if r.holes else "")
+          + (" (" + lista_huecos(r.holes) + ")" if r.holes else "")
           + f", {len(r.freezes)} corte(s) del grafico, "
           + ("se recupero" if r.frozen_since is None else "SIGUE CORTADO al cerrar"))
     lost = c["tramas_perdidas"] + c["descartadas_micro"] + c["crc_mal"]

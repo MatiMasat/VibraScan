@@ -37,7 +37,7 @@ RECONNECT_S = 1.0           # espera entre intentos de reabrir el puerto
 FLUSH_S = 1.0               # cada cuanto se vuelca el CSV a disco
 META_S = 10.0               # cada cuanto se reescribe el JSON
 MAX_EVENTS = 2000           # eventos guardados en el JSON
-DISCONTINUIDADES = ("seq", "n", "hueco", "odr")   # eventos de vp.Checker que abren segmento
+DISCONTINUIDADES = ("seq", "n", "hueco", "odr", "tiempo")   # eventos de vp.Checker que abren segmento
 COUNTERS = ("ovr", "bus_err", "drop", "stall", "bfull", "hueco")   # bus_err: i2c_err hasta la etapa 5
 
 
