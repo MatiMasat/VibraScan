@@ -5,11 +5,11 @@
   * Que hace:
   *   - Configura el sensor por SPI (sensor_spi.c), verifica DEVID y pone su
   *     FIFO en modo stream con la interrupcion watermark por INT1 -> PB0 al
-  *     juntar FIFO_WATERMARK muestras.
+  *     juntar fifo_wm muestras (comando fifo=).
   *   - Cada flanco de INT1 (EXTI) toma la hora y lanza un lote de lecturas
   *     por DMA, encadenadas en las interrupciones: FIFO_STATUS (cuantas
   *     muestras hay) y despues cada muestra (DATAX0..DATAZ1). La muestra
-  *     FIFO_WATERMARK - 1 del lote es la del flanco; las demas se ubican con
+  *     fifo_wm - 1 del lote es la del flanco; las demas se ubican con
   *     el periodo nominal. Si al terminar INT1 sigue en alto (el watermark es
   *     por nivel y no daria otro flanco) se lanza otro lote enseguida.
   *   - Cada muestra va al bloque en curso. Un bloque tiene hasta
@@ -40,7 +40,7 @@
   * (SETTLE_SAMPLES cada vez: al arrancar, con odr=, rango= o al reconectar).
   *
   * Campos informativos (del ultimo segundo):
-  *   fifo     muestras por aviso de INT1 (FIFO_WATERMARK)
+  *   fifo     muestras por aviso de INT1 (fifo_wm)
   *   int1     flancos de INT1 (~ odr / fifo)
   *   sps      muestras leidas (= odr)
   *   tmin     intervalo minimo entre flancos de INT1, en us (reloj del micro)
@@ -54,6 +54,8 @@
   *             escala es 3,9 mg/cuenta en cualquier rango; cambia el tope.
   *             Si se manda mientras se transmite, la reconfiguracion deja un
   *             hueco real de unos ms y se informa como tal.
+  *   fifo=<n>  muestras por aviso de INT1, 1 a 31 (por defecto FIFO_WM_DEFAULT).
+  *             Reconfigura el sensor como rango=.
   *   spi=<kHz> cambia el reloj del SPI: 3000, 1500, 750 o 375 (por defecto
   *             3000). Para estudiar el acople de la lectura en la medicion;
   *             reconfigura el sensor como rango= (deja un hueco de unos ms).
@@ -79,7 +81,7 @@
 #define APP_RATE_MAX          ADXL345_RATE_3200HZ
 #define APP_RANGE_DEFAULT     ADXL345_RANGE_4G     /* se cambia con el comando rango= */
 
-#define FIFO_WATERMARK        16U     /* aviso con 16 de 32: 5 ms de margen a 3200 Hz */
+#define FIFO_WM_DEFAULT       16U     /* muestras por aviso de INT1; se cambia con fifo= */
 #define STOP_TIMEOUT_MS       10U
 #define STATUS_PERIOD_MS      1000U
 #define RETRY_PERIOD_MS       500U
@@ -95,7 +97,7 @@
 _Static_assert(TX_BATCH_SIZE <= USB_LINK_MAX_WRITE, "TX_BATCH_SIZE mayor que lo que acepta usb_link");
 _Static_assert((BLOCK_COUNT & (BLOCK_COUNT - 1U)) == 0U, "BLOCK_COUNT debe ser potencia de 2");
 _Static_assert(BLOCK_SAMPLES <= 255U, "cant es de 8 bits");
-_Static_assert((FIFO_WATERMARK > 0U) && (FIFO_WATERMARK < ADXL345_FIFO_SIZE), "watermark de 1 a 31");
+_Static_assert((FIFO_WM_DEFAULT > 0U) && (FIFO_WM_DEFAULT < ADXL345_FIFO_SIZE), "watermark de 1 a 31");
 _Static_assert(ADXL345_DATA_LEN <= SENSOR_SPI_MAX_READ, "una muestra no entra en una lectura");
 
 /* ---- Bloque de muestras -------------------------------------------------- */
@@ -125,6 +127,7 @@ static adxl345_t        sensor;
 static adxl345_status_t sensor_status = ADXL345_ERR_BUS;
 static adxl345_rate_t   app_rate = APP_RATE_DEFAULT;
 static adxl345_range_t  app_range = APP_RANGE_DEFAULT;
+static uint8_t          fifo_wm = FIFO_WM_DEFAULT;   /* muestras por aviso de INT1 */
 
 /* Compartido con las interrupciones (EXTI y DMA del SPI) */
 static volatile bool     sampling;        /* true = las interrupciones pueden leer */
@@ -307,7 +310,7 @@ static void on_fifo_status(const uint8_t *data, uint16_t len);
 static void on_sample(const uint8_t *data, uint16_t len);
 
 /* Empieza un lote. from_edge: lo lanzo un flanco de INT1 (t_us es la hora de
-   la muestra FIFO_WATERMARK - 1); si no, t_us es la hora de la ultima. */
+   la muestra fifo_wm - 1); si no, t_us es la hora de la ultima. */
 static void start_batch(uint32_t t_us, bool from_edge)
 {
   if (!claim_bus())
@@ -315,7 +318,7 @@ static void start_batch(uint32_t t_us, bool from_edge)
     return;
   }
   batch_t_us = t_us;
-  batch_ref = from_edge ? (uint8_t)(FIFO_WATERMARK - 1U) : 0xFFU;
+  batch_ref = from_edge ? (uint8_t)(fifo_wm - 1U) : 0xFFU;
   if (!sensor_spi_read_async(ADXL345_REG_FIFO_STATUS, 1U, on_fifo_status))
   {
     rx_busy = false;
@@ -528,7 +531,7 @@ static void start_sampling(void)
   blk_odr = (uint16_t)hz;
   period_ns = 1000000000U / hz;
   gap_limit_us = 1500000U / hz;
-  stall_ms = 2U * FIFO_WATERMARK * 1000U / hz + 2U;
+  stall_ms = 2U * fifo_wm * 1000U / hz + 2U;
   settle_skip = SETTLE_SAMPLES;        /* el sensor se acaba de configurar */
 
   consecutive_err = 0;
@@ -546,7 +549,7 @@ static void sensor_connect(void)
   sensor_status = adxl345_init(&sensor, &spi_bus, app_rate, app_range);
   if (sensor_status == ADXL345_OK)
   {
-    sensor_status = adxl345_start_fifo(&sensor, FIFO_WATERMARK);
+    sensor_status = adxl345_start_fifo(&sensor, fifo_wm);
   }
   if (sensor_status == ADXL345_OK)
   {
@@ -692,7 +695,7 @@ static void send_status(void)
               "estado=OK etapa=%d bus=spi spi=%lu devid=0x%02X odr=%lu rango=%u fifo=%u n=%lu ovr=%lu bus_err=%lu drop=%lu stall=%lu bfull=%lu hueco=%lu asent=%lu int1=%lu sps=%lu tmin=%lu tmax=%lu",
               APP_STAGE, (unsigned long)sensor_spi_khz(), sensor.devid,
               (unsigned long)adxl345_rate_hz(app_rate), 2U << (unsigned)app_range,
-              (unsigned)FIFO_WATERMARK,
+              (unsigned)fifo_wm,
               (unsigned long)n_samples, (unsigned long)n_overrun,
               (unsigned long)n_bus_err, (unsigned long)n_drop,
               (unsigned long)n_stall, (unsigned long)n_buf_full, (unsigned long)n_gap,
@@ -784,6 +787,21 @@ static void cmd_rango(unsigned long g)
   send_text(TRAMA_RESPUESTA, "rango=%lu no_valido (2, 4, 8 o 16)", g);
 }
 
+/* "fifo=<n>": muestras por aviso de INT1 (watermark del FIFO, 1 a 31). */
+static void cmd_fifo(unsigned long n)
+{
+  if ((n == 0UL) || (n >= ADXL345_FIFO_SIZE))
+  {
+    send_text(TRAMA_RESPUESTA, "fifo=%lu no_valido (1 a 31)", n);
+    return;
+  }
+  (void)pause_sampling();
+  close_block();
+  fifo_wm = (uint8_t)n;
+  sensor_connect();
+  send_text(TRAMA_RESPUESTA, "fifo=%lu ok", n);
+}
+
 /* "spi=<kHz>": cambia el reloj del SPI (ver sensor_spi_set_khz). */
 static void cmd_spi(unsigned long khz)
 {
@@ -825,6 +843,10 @@ static void process_commands(void)
   else if (sscanf(cmd, "rango=%lu", &hz) == 1)
   {
     cmd_rango(hz);
+  }
+  else if (sscanf(cmd, "fifo=%lu", &hz) == 1)
+  {
+    cmd_fifo(hz);
   }
   else if (sscanf(cmd, "spi=%lu", &hz) == 1)
   {
