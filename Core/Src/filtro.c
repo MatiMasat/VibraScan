@@ -4,6 +4,12 @@
   */
 #include "filtro.h"
 
+/* El proyecto compila en Debug (-O0, para depurar con el ST-Link); este
+   archivo corre por cada muestra y se optimiza aparte: con -O0 el filtro
+   usaba ~18 % del CPU a 3200 Hz (medido en la etapa 7). Optimizar solo
+   aca no cambia la temporizacion de la lectura del FIFO (etapa 6). */
+#pragma GCC optimize ("O2")
+
 #define PI_F  3.14159265358979f
 
 int filtro_configurar(filtro_t *f, filtro_tipo_t tipo, float fs,

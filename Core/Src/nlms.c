@@ -4,6 +4,12 @@
   */
 #include "nlms.h"
 
+/* El proyecto compila en Debug (-O0, para depurar con el ST-Link); este
+   archivo corre por cada muestra y se optimiza aparte: con -O0 el filtro
+   usaba ~18 % del CPU a 3200 Hz (medido en la etapa 7). Optimizar solo
+   aca no cambia la temporizacion de la lectura del FIFO (etapa 6). */
+#pragma GCC optimize ("O2")
+
 #include <string.h>
 
 int nlms_iniciar(nlms_t *f, uint16_t taps, uint16_t delta, float mu)
