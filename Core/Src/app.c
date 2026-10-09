@@ -149,6 +149,9 @@ static volatile uint8_t  batch_count;     /* muestras a leer */
 static volatile uint8_t  batch_idx;       /* proxima a leer */
 static volatile uint8_t  batch_ref;       /* indice de la muestra que corresponde a batch_t_us */
 static volatile bool     batch_overrun;   /* el FIFO estaba lleno: faltan muestras antes */
+static volatile bool     batch_discard;   /* lote que se lee y se descarta (resincronizacion) */
+static bool              resync;          /* tras un FIFO lleno: hasta un aviso con hora exacta */
+static bool              ovr_pending;     /* marcar OVR en la proxima muestra guardada */
 static uint32_t          period_ns;       /* periodo nominal */
 static uint32_t          stall_ms;        /* sin lotes por mas que esto con INT1 en alto = stall */
 
@@ -374,23 +377,52 @@ static void on_fifo_status(const uint8_t *data, uint16_t len)
   {
     n_overrun++;                       /* el FIFO se lleno: se perdieron muestras */
   }
-  /* Hora de las muestras del lote (medido en la etapa 6 al reconectar INT1):
-     - FIFO lleno o sin muestra anterior: faltan muestras (no se sabe
-       cuantas) o no hay referencia; la ultima es de ahora.
-     - Flanco de un aviso recien cumplido: la muestra fifo_wm - 1 es la del
-       flanco (exacto).
-     - Cualquier otro lote (sin flanco, o un flanco con el FIFO muy lleno):
-       el FIFO no pierde muestras salvo que se llene, asi que cada una va un
-       periodo despues de la anterior. "Ahora" podria errar hasta un periodo
-       y simular un hueco. */
-  if (batch_overrun || !have_last)
+  /* Hora de las muestras del lote (medido en la etapa 6 al reconectar INT1).
+     Una muestra solo se guarda si su hora es confiable:
+     - Flanco de un aviso recien cumplido (exacto): la muestra fifo_wm - 1
+       es la del flanco.
+     - FIFO lleno: faltan muestras y, mientras se lee, el sensor sigue
+       pisando las mas viejas (la secuencia leida ya no es continua). Se
+       resincroniza: se leen y descartan los lotes hasta un aviso exacto. El
+       hueco se marca una vez, con hora exacta a los dos lados.
+     - Otro lote (sin flanco o con el FIFO muy lleno) sin FIFO lleno: el
+       FIFO no pierde muestras, asi que cada una va un periodo despues de la
+       anterior (continuidad). "Ahora" podria errar hasta un periodo.
+     - Sin muestra anterior (arranque) y sin flanco exacto: la ultima es de
+       ahora. */
   {
-    batch_ref = (uint8_t)(entries - 1U);
-  }
-  else if ((batch_ref == 0xFFU) || (entries > (uint8_t)(fifo_wm + BATCH_EXTRA_MAX)))
-  {
-    batch_t_us = last_t_us + (period_ns + 500U) / 1000U;
-    batch_ref = 0;
+    bool exact = (batch_ref != 0xFFU) && !batch_overrun &&
+                 (entries <= (uint8_t)(fifo_wm + BATCH_EXTRA_MAX));
+
+    if (batch_overrun)
+    {
+      resync = true;
+      ovr_pending = true;
+    }
+    batch_discard = false;
+    if (resync)
+    {
+      if (exact)
+      {
+        resync = false;
+      }
+      else
+      {
+        batch_discard = true;
+      }
+    }
+    else if (!exact)
+    {
+      if (have_last)
+      {
+        batch_t_us = last_t_us + (period_ns + 500U) / 1000U;
+        batch_ref = 0;
+      }
+      else
+      {
+        batch_ref = (uint8_t)(entries - 1U);
+      }
+    }
   }
   batch_count = entries;
   batch_idx = 0;
@@ -414,6 +446,10 @@ static void on_sample(const uint8_t *data, uint16_t len)
     read_error();
     return;
   }
+  if (batch_discard)
+  {
+    goto siguiente;                    /* resincronizacion: se lee y se descarta */
+  }
   adxl345_decode_xyz(data, &s);
   /* En ns y dividiendo al final: a 3200 Hz el periodo es 312,5 us y redondearlo
      antes perderia 0,5 us por muestra. Entra en 32 bits: 33 x 10 ms (100 Hz). */
@@ -422,7 +458,7 @@ static void on_sample(const uint8_t *data, uint16_t len)
   /* Hueco: mas de 1,5 periodos desde la muestra anterior, o FIFO lleno (no
      se sabe cuantas faltan; la PC lo calcula con t0). El bloque en curso se
      cierra para que cada bloque tenga solo muestras contiguas. */
-  if (have_last && ((((int32_t)(t - last_t_us)) > (int32_t)gap_limit_us) || (batch_overrun && (idx == 0U))))
+  if (have_last && (((int32_t)(t - last_t_us)) > (int32_t)gap_limit_us))
   {
     n_gap++;
     close_block();
@@ -442,10 +478,12 @@ static void on_sample(const uint8_t *data, uint16_t len)
   }
   else
   {
-    store_sample(&s, t, batch_overrun && (idx == 0U));
+    store_sample(&s, t, ovr_pending);
+    ovr_pending = false;
     n_samples++;
   }
 
+siguiente:
   batch_idx = (uint8_t)(idx + 1U);
   if (batch_idx < batch_count)
   {
@@ -555,6 +593,8 @@ static void start_sampling(void)
   gap_limit_us = 1500000U / hz;
   stall_ms = 2U * fifo_wm * 1000U / hz + 2U;
   settle_skip = SETTLE_SAMPLES;        /* el sensor se acaba de configurar */
+  resync = false;
+  ovr_pending = false;
 
   consecutive_err = 0;
   bus_lost = false;
