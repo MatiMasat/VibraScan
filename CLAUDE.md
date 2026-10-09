@@ -107,8 +107,13 @@ hay que ubicar las equivalentes y, si cambian, anotarlas acá.
 
 - `main.c` lo genera CubeMX y solo llama a `app_init()` / `app_loop()`. La lógica
   de la etapa va en `app.c`.
-- `adxl345.c` no conoce HAL ni el bus: recibe funciones read/write. El paso a
-  SPI (etapa 6) solo cambia esas funciones.
+- `adxl345.c` no conoce HAL ni el bus: recibe funciones read/write.
+  `sensor_spi.c` es lo único que conoce SPI1, sus pines, el DMA y CS (etapa 6).
+- **La lectura del FIFO no puede pisar la conversión siguiente del sensor**
+  (etapa 6): si hay actividad en el SPI mientras el ADXL345 convierte, esa
+  muestra sale desviada en Z (hasta ~140 mg). Por eso el aviso es cada 2
+  muestras. No subirlo ni demorar las lecturas (por ejemplo con trabajo en
+  interrupciones de más prioridad) sin volver a medir con `fifo=`.
 - `usb_link.c` es lo único que conoce el transporte USB CDC.
 - Comentarios y nombres en español, sin tildes en el código C.
 - Protocolo binario (etapa 3): tramas `A5 5A` + tipo + largo + seq + contenido
