@@ -41,14 +41,15 @@ https://github.com/MatiMasat/VibraScan.git.
 | `etapa-3` | Bloques de 32 muestras y trama binaria con CRC-16, `start`/`stop`, huecos con `t0` | Aprobada el 2026-10-04 (automática 10 min y manual) |
 | `etapa-4` | Captura a archivo (CSV de cuentas + JSON, segmentos, reconexión), visor con envolvente, `rango=`, descarte de asentamiento | Aprobada el 2026-10-04 (reposo 30 min, golpes, manual) |
 | `etapa-5` | PSD por Welch propio en numpy (convenciones para la etapa 7), espectrograma, aliasing | Aprobada el 2026-10-04 (tonos de 150/250/350 Hz y 500 Hz reflejado) |
-| (sin rama) | 6: SPI a 3200 Hz (con el FIFO del ADXL345) | Próxima |
+| `etapa-6` | ADXL345 por SPI con FIFO (aviso cada 2) y DMA, hasta 3200 Hz; `fifo=`, `spi=` | Aprobada el 2026-10-08 (10 min a 3200 Hz, tonos de 500 y 1000 Hz, manual) |
+| (sin rama) | 7: FFT y filtro adaptativo (LMS) en el micro | Próxima |
 
-Para la etapa 6: a 800 Hz el filtro del sensor casi no atenúa por encima
-de fs/2 (un tono de 500 Hz apareció en 293 Hz con más amplitud que los
-tonos dentro de la banda). Fuente de prueba que funciona: el parlante del
-celular con un generador de tonos, empezando cada captura con ~5 s de
-silencio. La etapa 7 tiene que copiar las convenciones del Welch del
-README (Hann periódica, 50 %, media por tramo, escala de densidad).
+Para la etapa 7: copiar las convenciones del Welch del README (Hann
+periódica, 50 %, media por tramo, escala de densidad). El cálculo en el micro
+**no puede demorar la lectura del FIFO** (ver Convenciones). Fuente de prueba
+que funciona: el parlante del celular con un generador de tonos, empezando
+cada captura con ~5 s de silencio. El sensor está por SPI (recableado en la
+etapa 6; conexiones en el README).
 
 Desde la etapa 3 el enlace es binario (ver README y `pc/vibrascan_proto.py`):
 un monitor serie ya no sirve para mirar los datos; usar

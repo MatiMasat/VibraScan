@@ -5,7 +5,20 @@ con un ADXL345 sobre una Black Pill (STM32F411CEU6). Se construye por etapas;
 cada una se prueba sola antes de sumar la siguiente. Cada etapa aprobada tiene
 un tag en git (`etapa-1`, `etapa-2`, ...).
 
-## Etapa 6 - SPI a 3200 Hz con el FIFO del ADXL345 (en curso)
+## Etapa 6 - SPI a 3200 Hz con el FIFO del ADXL345 (aprobada, tag `etapa-6`)
+
+Aprobada el 2026-10-08 en la placa:
+
+- `etapa3_prueba.py` a 3200, 1600, 800, 400 y 100 Hz sin fallas, y 10 minutos
+  a 3200 Hz: 1 906 848 muestras, 0 CRC mal, 0 tramas perdidas, 0 huecos,
+  contadores sin cambios, intervalo entre avisos de INT1 de 629 µs exactos.
+- Tonos con el parlante del celular a 3200 Hz: **500 Hz en 499,97 Hz** (a
+  800 Hz aparecía reflejado en 293 Hz) y **1000 Hz en 999,92 Hz**, ambos
+  > 40 dB sobre el piso y Parseval 1,000. La armónica 3 del tono de 1000 Hz
+  (3000 Hz, por encima de fs/2 ≈ 1589 Hz) apareció reflejada en 178 Hz: el
+  aliasing sigue existiendo, ahora por encima de ~1590 Hz.
+- Monitor a 3200 Hz: reposo, golpes, reconexión del USB y corte de INT1
+  (un solo hueco, con hora exacta a los dos lados).
 
 El sensor pasa de I2C a **SPI** (recableado, ver Conexiones) y se lee por su
 **FIFO**. El ODR llega a 3200 Hz: el límite de medición sube de ~397 Hz a
@@ -59,6 +72,25 @@ Con 4 o menos el lote termina antes de la conversión siguiente. Se eligió
 **No subir el aviso, ni agregar trabajo que demore las lecturas (etapa 7),
 sin volver a medir** con `fifo=`. En las etapas 2 a 5 (I2C, una muestra por
 interrupción, siempre en la misma fase) esto no se veía.
+
+### Hora de las muestras tras un corte (encontrado en las pruebas manuales)
+
+Al reconectar INT1 con el FIFO lleno aparecían horas corridas (un bloque
+9 ms fuera de lugar, después huecos falsos de 0,6–0,9 ms). Quedó así:
+
+- Flanco de un aviso recién cumplido (el FIFO tiene entre `fifo` y `fifo`+3
+  muestras): la muestra `fifo` − 1 es la del flanco (exacto).
+- **FIFO lleno**: mientras se lee, el sensor sigue pisando las más viejas y la
+  secuencia deja de ser continua. Se **resincroniza**: se leen y descartan
+  los lotes hasta un aviso exacto (< 1 ms con aviso cada 2). El hueco se
+  marca una vez (con OVR).
+- Cualquier otro lote: **continuidad** (la anterior + un período).
+- Un flanco que llega mientras se lee un lote es viejo y se descarta.
+
+En la PC, `vibrascan_proto.Checker` solo promedia el período con mediciones
+a ±2 % del actual (antes un bloque con la hora mal lo dejaba en 286 µs y cada
+bloque siguiente parecía un hueco) e informa `tiempo` si `t0` retrocede. El
+estado de cada segundo se saltea si el USB está ocupado, sin gastar `seq`.
 
 ### Otras observaciones
 
@@ -480,7 +512,7 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
 | 3 | Buffer por bloques y trama binaria con checksum | minutos sin pérdidas (aprobada) |
 | 4 | Captura a archivo y gráfico en tiempo | reposo estable, golpe visible (aprobada) |
 | 5 | Preproceso y FFT/PSD en Python | pico en la frecuencia de una fuente conocida (aprobada) |
-| 6 | SPI a 3200 Hz (con el FIFO del ADXL345) | igual que 2 y 3, y un tono de 500 Hz en 500 Hz (en curso) |
+| 6 | SPI a 3200 Hz (con el FIFO del ADXL345) | igual que 2 y 3, y un tono de 500 Hz en 500 Hz (aprobada) |
 | 7 | FFT y filtro adaptativo (LMS) en el micro | mismo resultado que en Python |
 
 ## Sobre VibraScan_v2.ioc
