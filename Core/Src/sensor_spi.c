@@ -200,6 +200,38 @@ void sensor_spi_abort(void)
   cs_high();
 }
 
+static const struct { uint32_t div; uint32_t prescaler; } SPI_DIVS[] = {
+  { 32U, SPI_BAUDRATEPRESCALER_32 }, { 64U, SPI_BAUDRATEPRESCALER_64 },
+  { 128U, SPI_BAUDRATEPRESCALER_128 }, { 256U, SPI_BAUDRATEPRESCALER_256 },
+};
+
+bool sensor_spi_set_khz(uint32_t khz)
+{
+  uint32_t pclk_khz = HAL_RCC_GetPCLK2Freq() / 1000U;
+
+  for (uint32_t i = 0; i < sizeof(SPI_DIVS) / sizeof(SPI_DIVS[0]); i++)
+  {
+    if (pclk_khz / SPI_DIVS[i].div == khz)
+    {
+      hspi1.Init.BaudRatePrescaler = SPI_DIVS[i].prescaler;
+      return HAL_SPI_Init(&hspi1) == HAL_OK;
+    }
+  }
+  return false;
+}
+
+uint32_t sensor_spi_khz(void)
+{
+  for (uint32_t i = 0; i < sizeof(SPI_DIVS) / sizeof(SPI_DIVS[0]); i++)
+  {
+    if (SPI_DIVS[i].prescaler == hspi1.Init.BaudRatePrescaler)
+    {
+      return HAL_RCC_GetPCLK2Freq() / 1000U / SPI_DIVS[i].div;
+    }
+  }
+  return 0U;
+}
+
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
   if (hspi == &hspi1)

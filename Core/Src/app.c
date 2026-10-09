@@ -54,6 +54,9 @@
   *             escala es 3,9 mg/cuenta en cualquier rango; cambia el tope.
   *             Si se manda mientras se transmite, la reconfiguracion deja un
   *             hueco real de unos ms y se informa como tal.
+  *   spi=<kHz> cambia el reloj del SPI: 3000, 1500, 750 o 375 (por defecto
+  *             3000). Para estudiar el acople de la lectura en la medicion;
+  *             reconfigura el sensor como rango= (deja un hueco de unos ms).
   *
   * LED (PC13): parpadeo lento = midiendo, parpadeo rapido = sensor no responde.
   */
@@ -686,8 +689,8 @@ static void send_status(void)
   if (sensor_status == ADXL345_OK)
   {
     send_text(TRAMA_ESTADO,
-              "estado=OK etapa=%d bus=spi devid=0x%02X odr=%lu rango=%u fifo=%u n=%lu ovr=%lu bus_err=%lu drop=%lu stall=%lu bfull=%lu hueco=%lu asent=%lu int1=%lu sps=%lu tmin=%lu tmax=%lu",
-              APP_STAGE, sensor.devid,
+              "estado=OK etapa=%d bus=spi spi=%lu devid=0x%02X odr=%lu rango=%u fifo=%u n=%lu ovr=%lu bus_err=%lu drop=%lu stall=%lu bfull=%lu hueco=%lu asent=%lu int1=%lu sps=%lu tmin=%lu tmax=%lu",
+              APP_STAGE, (unsigned long)sensor_spi_khz(), sensor.devid,
               (unsigned long)adxl345_rate_hz(app_rate), 2U << (unsigned)app_range,
               (unsigned)FIFO_WATERMARK,
               (unsigned long)n_samples, (unsigned long)n_overrun,
@@ -781,6 +784,25 @@ static void cmd_rango(unsigned long g)
   send_text(TRAMA_RESPUESTA, "rango=%lu no_valido (2, 4, 8 o 16)", g);
 }
 
+/* "spi=<kHz>": cambia el reloj del SPI (ver sensor_spi_set_khz). */
+static void cmd_spi(unsigned long khz)
+{
+  bool ok;
+
+  (void)pause_sampling();
+  close_block();
+  ok = sensor_spi_set_khz(khz);
+  sensor_connect();                    /* vuelve a medir (con el reloj nuevo si se pudo) */
+  if (ok)
+  {
+    send_text(TRAMA_RESPUESTA, "spi=%lu ok", khz);
+  }
+  else
+  {
+    send_text(TRAMA_RESPUESTA, "spi=%lu no_valido (3000, 1500, 750 o 375)", khz);
+  }
+}
+
 static void process_commands(void)
 {
   char cmd[24];
@@ -803,6 +825,10 @@ static void process_commands(void)
   else if (sscanf(cmd, "rango=%lu", &hz) == 1)
   {
     cmd_rango(hz);
+  }
+  else if (sscanf(cmd, "spi=%lu", &hz) == 1)
+  {
+    cmd_spi(hz);
   }
   else if (sscanf(cmd, "odr=%lu", &hz) == 1)
   {

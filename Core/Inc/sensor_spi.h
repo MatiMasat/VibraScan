@@ -38,4 +38,11 @@ bool sensor_spi_read_async(uint8_t reg, uint16_t len, sensor_spi_done_fn done);
 /** Cancela una lectura asincronica en curso y deja CS en alto. */
 void sensor_spi_abort(void);
 
+/** Cambia el reloj del SPI: 3000, 1500, 750 o 375 kHz (96 MHz / 32 a 256).
+  * Solo sin transferencias en curso. Devuelve false si el valor no es valido. */
+bool sensor_spi_set_khz(uint32_t khz);
+
+/** Reloj actual del SPI en kHz. */
+uint32_t sensor_spi_khz(void);
+
 #endif /* SENSOR_SPI_H */
