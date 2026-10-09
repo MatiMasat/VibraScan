@@ -193,19 +193,28 @@ def armonica_de(pk, f0, fs, df, kmax=6):
     return None
 
 
-ESPECTROGRAMA_NPERSEG = 256     # 0,32 s a ~796 Hz: resolucion 3,1 Hz
-ESPECTROGRAMA_PASO = 64
+ESPECTROGRAMA_TRAMO_S = 0.32    # duracion de cada tramo: ~3,1 Hz de resolucion en cualquier ODR
+                                # (256 muestras a 800 Hz, 1024 a 3200 Hz)
 ESPECTROGRAMA_COLUMNAS = 4000   # en capturas largas el paso crece para no pasarse
 
 
-def espectrograma(cap, eje=3, nperseg=ESPECTROGRAMA_NPERSEG, desde=None, hasta=None):
+def espectrograma_nperseg(fs):
+    """Muestras por tramo del espectrograma: potencia de 2 que mas se acerca a
+    ESPECTROGRAMA_TRAMO_S (misma resolucion en tiempo y frecuencia a cualquier ODR)."""
+    return int(2 ** round(np.log2(fs * ESPECTROGRAMA_TRAMO_S)))
+
+
+def espectrograma(cap, eje=3, nperseg=None, desde=None, hasta=None):
     """PSD en funcion del tiempo. eje 0..2 = x, y, z; 3 = suma. Devuelve
     (t, f, P) con P de forma (F, T) en g^2/Hz; las columnas sin datos (huecos
     entre segmentos) quedan en NaN."""
     t0 = cap.t[0] if desde is None else desde
     t1 = cap.t[-1] if hasta is None else hasta
     fs_ref = 1e6 / cap.meta["periodo_us"] if cap.meta.get("periodo_us") else 800.0
-    paso = max(ESPECTROGRAMA_PASO, int(np.ceil((t1 - t0) * fs_ref / ESPECTROGRAMA_COLUMNAS)))
+    nperseg = nperseg or espectrograma_nperseg(fs_ref)
+    # Paso de un cuarto de tramo; en capturas largas crece para no pasar de
+    # ESPECTROGRAMA_COLUMNAS columnas
+    paso = max(nperseg // 4, int(np.ceil((t1 - t0) * fs_ref / ESPECTROGRAMA_COLUMNAS)))
     dt = paso / fs_ref
     cols = int((t1 - t0) / dt) + 1
     f = np.fft.rfftfreq(nperseg, 1 / fs_ref)
