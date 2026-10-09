@@ -374,14 +374,23 @@ static void on_fifo_status(const uint8_t *data, uint16_t len)
   {
     n_overrun++;                       /* el FIFO se lleno: se perdieron muestras */
   }
-  /* Sin flanco, o con un flanco que no es un aviso recien cumplido (FIFO con
-     muchas mas muestras que el aviso: al reconectar INT1 o tras una demora
-     grande), la hora es la de la ultima muestra, que acaba de llegar. Si no,
-     las muestras viejas del FIFO quedarian con la hora corrida (etapa 6: al
-     reconectar INT1 un lote quedo 9 ms adelantado). */
-  if ((batch_ref == 0xFFU) || (entries > (uint8_t)(fifo_wm + BATCH_EXTRA_MAX)))
+  /* Hora de las muestras del lote (medido en la etapa 6 al reconectar INT1):
+     - FIFO lleno o sin muestra anterior: faltan muestras (no se sabe
+       cuantas) o no hay referencia; la ultima es de ahora.
+     - Flanco de un aviso recien cumplido: la muestra fifo_wm - 1 es la del
+       flanco (exacto).
+     - Cualquier otro lote (sin flanco, o un flanco con el FIFO muy lleno):
+       el FIFO no pierde muestras salvo que se llene, asi que cada una va un
+       periodo despues de la anterior. "Ahora" podria errar hasta un periodo
+       y simular un hueco. */
+  if (batch_overrun || !have_last)
   {
     batch_ref = (uint8_t)(entries - 1U);
+  }
+  else if ((batch_ref == 0xFFU) || (entries > (uint8_t)(fifo_wm + BATCH_EXTRA_MAX)))
+  {
+    batch_t_us = last_t_us + (period_ns + 500U) / 1000U;
+    batch_ref = 0;
   }
   batch_count = entries;
   batch_idx = 0;
@@ -941,7 +950,11 @@ void app_loop(void)
     {
       check_devid();                   /* SPI no avisa si el sensor se desconecta */
     }
-    if (streaming)
+    /* Si el USB esta ocupado (la PC no lee) se saltea este estado sin gastar
+       un numero de seq: si no, la PC lo veria como una trama perdida. El
+       siguiente trae los contadores acumulados. (El estado que sale con
+       start si espera: la PC lo necesita.) */
+    if (streaming && usb_link_can_write())
     {
       send_status();
     }
