@@ -104,6 +104,15 @@ def nlms(x, taps=TAPS, delta=DELTA, mu=MU):
     return out[:, 0], out[:, 1]
 
 
+def ganancia_ale(snr_db, taps=TAPS):
+    """Ganancia del tono en la salida de un ALE en regimen (solucion de Wiener):
+    G = (M r / 2) / (1 + M r / 2), con r = potencia del tono / potencia del
+    ruido en la entrada (toda la banda) y M = taps. Con mucha senal G ~ 1; con
+    poca, parte del tono no se puede predecir y queda en el residuo e."""
+    r = 10 ** (snr_db / 10)
+    return (taps * r / 2) / (1 + taps * r / 2)
+
+
 def snr_banda_db(x, fs, f_tono):
     """Relacion senal/ruido de un tono en TODA la banda (0 a fs/2): potencia del
     tono contra la potencia de todo lo demas. Es la medida que mejora un

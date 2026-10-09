@@ -35,7 +35,7 @@ from etapa5_prueba import encendido
 DIF_MAX_G = 1e-4          # micro (float32) vs Python (float64): 0,1 mg, 39 veces menos que 1 cuenta
 CPU_MAX = 0.10            # el filtro no puede usar mas del 10 % del CPU
 MEJORA_MIN_DB = 6.0       # el tono tiene que salir al menos 6 dB mas limpio en y
-SUPRESION_MIN_DB = 10.0   # y quedar al menos 10 dB mas bajo en el residuo e
+GANANCIA_TOL_DB = 1.5     # ganancia del tono en y: la de la teoria del ALE +/- esto
 CONVERGE_MAX_S = 2.0
 ESPERA_S = 3.0            # se analiza despues de este tiempo (ya convergio)
 G_PER_LSB_F32 = np.float32(0.0039)
@@ -136,13 +136,18 @@ def tono(cap, f_tono):
           f"y {ay * 1000:.2f} mg, e {ae * 1000:.2f} mg (rms)")
     checks.append(("Mejora de SNR en y (toda la banda)", sy - sx >= MEJORA_MIN_DB,
                    f"{sx:.1f} dB en la entrada -> {sy:.1f} dB en y ({sy - sx:+.1f} dB, min +{MEJORA_MIN_DB:.0f})"))
-    if ae > 0:
-        sup = 20 * np.log10(ax / ae)
-        detalle = f"el tono queda {sup:.1f} dB mas bajo en e que en la entrada (min {SUPRESION_MIN_DB:.0f})"
-    else:
-        sup = float("inf")
-        detalle = "en e el tono queda por debajo del piso de ruido (no se distingue)"
-    checks.append(("Tono fuera del residuo e", sup >= SUPRESION_MIN_DB, detalle))
+    # Ganancia del tono: con poca senal el ALE no recupera todo el tono (parte
+    # queda en e). Se compara con la solucion de Wiener (vf.ganancia_ale).
+    g_teo = vf.ganancia_ale(sx, taps)
+    g_med = ay / ax
+    dif = 20 * np.log10(g_med / g_teo)
+    checks.append(("Ganancia del tono como la teoria", abs(dif) <= GANANCIA_TOL_DB,
+                   f"medida {20 * np.log10(g_med):+.1f} dB, teoria {20 * np.log10(g_teo):+.1f} dB "
+                   f"(G = Mr/2 / (1 + Mr/2), M={taps}, r={10 ** (sx / 10):.3f}); diferencia {dif:+.1f} dB "
+                   f"(max {GANANCIA_TOL_DB})"))
+    print("  tono en el residuo e: " + (f"{20 * np.log10(ax / ae):.1f} dB por debajo de la entrada "
+                                       f"(teoria {-20 * np.log10(1 - g_teo):.1f} dB)" if ae > 0
+                                       else "por debajo del piso de ruido"))
 
     # Convergencia: amplitud de y en ventanas de 0,1 s desde el inicio del tramo
     yy = cap.filtro["y"][j_on:i1]          # desde que se prende el tono
