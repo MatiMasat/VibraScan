@@ -29,6 +29,7 @@ import numpy as np
 import vibrascan_archivo as va
 import vibrascan_espectro as ve  # noqa: F401 (ve.NPERSEG)
 import vibrascan_filtro as vf
+from etapa5_prueba import encendido
 
 # Umbrales
 DIF_MAX_G = 1e-4          # micro (float32) vs Python (float64): 0,1 mg, 39 veces menos que 1 cuenta
@@ -108,8 +109,18 @@ def tono(cap, f_tono):
         checks.append(("Salida del filtro", False, "la captura no tiene <base>_filtro.csv"))
         return checks
     fs = 1e6 / cap.meta["periodo_us"] if cap.meta.get("periodo_us") else float(cap.meta.get("odr_hz"))
-    i0, i1 = max(runs(cap), key=lambda r: r[1] - r[0])          # tramo mas largo
-    k = i0 + int(ESPERA_S * fs)
+    # El tono se prende despues del silencio inicial: se mide desde ahi (si no,
+    # el silencio contaria como tiempo de convergencia)
+    t_on = encendido(cap, f_tono)
+    if t_on is None:
+        checks.append(("Tono presente", False, f"no aparece en {f_tono:g} Hz en el espectrograma"))
+        return checks
+    n_on = cap.n[min(int(np.searchsorted(cap.t, t_on)), len(cap.n) - 1)]
+    i0, i1 = next(((a, b) for a, b in runs(cap) if cap.filtro["n"][a] <= n_on < cap.filtro["n"][b - 1]),
+                  max(runs(cap), key=lambda r: r[1] - r[0]))
+    j_on = i0 + int(np.searchsorted(cap.filtro["n"][i0:i1], n_on))
+    print(f"  el tono se prende en t = {t_on:.1f} s")
+    k = j_on + int(ESPERA_S * fs)
     if k >= i1 - 4 * ve.NPERSEG:
         checks.append(("Duracion", False, "captura muy corta"))
         return checks
@@ -130,13 +141,14 @@ def tono(cap, f_tono):
                    f"el tono queda {sup:.1f} dB mas bajo en e que en la entrada (min {SUPRESION_MIN_DB:.0f})"))
 
     # Convergencia: amplitud de y en ventanas de 0,1 s desde el inicio del tramo
-    yy = cap.filtro["y"][i0:i1]
+    yy = cap.filtro["y"][j_on:i1]          # desde que se prende el tono
     w = max(1, int(0.1 * fs))
     amp = np.array([np.sqrt(np.mean(yy[j:j + w] ** 2)) for j in range(0, len(yy) - w, w)])
     final = np.median(amp[int(ESPERA_S / 0.1):])
     t90 = next((j * 0.1 for j, a in enumerate(amp) if a >= 0.9 * final), None)
     checks.append(("Convergencia", t90 is not None and t90 <= CONVERGE_MAX_S,
-                   f"y llega al 90 % de su amplitud final en {t90:.2f} s (max {CONVERGE_MAX_S:.0f} s)"
+                   f"y llega al 90 % de su amplitud final {t90:.2f} s despues de prenderse el tono "
+                   f"(max {CONVERGE_MAX_S:.0f} s)"
                    if t90 is not None else "no converge"))
     return checks
 
