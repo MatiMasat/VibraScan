@@ -5,6 +5,133 @@ con un ADXL345 sobre una Black Pill (STM32F411CEU6). Se construye por etapas;
 cada una se prueba sola antes de sumar la siguiente. Cada etapa aprobada tiene
 un tag en git (`etapa-1`, `etapa-2`, ...).
 
+## Etapa 6 - SPI a 3200 Hz con el FIFO del ADXL345 (aprobada, tag `etapa-6`)
+
+Aprobada el 2026-10-08 en la placa:
+
+- `etapa3_prueba.py` a 3200, 1600, 800, 400 y 100 Hz sin fallas, y 10 minutos
+  a 3200 Hz: 1 906 848 muestras, 0 CRC mal, 0 tramas perdidas, 0 huecos,
+  contadores sin cambios, intervalo entre avisos de INT1 de 629 µs exactos.
+- Tonos con el parlante del celular a 3200 Hz: **500 Hz en 499,97 Hz** (a
+  800 Hz aparecía reflejado en 293 Hz) y **1000 Hz en 999,92 Hz**, ambos
+  > 40 dB sobre el piso y Parseval 1,000. La armónica 3 del tono de 1000 Hz
+  (3000 Hz, por encima de fs/2 ≈ 1589 Hz) apareció reflejada en 178 Hz: el
+  aliasing sigue existiendo, ahora por encima de ~1590 Hz.
+- Monitor a 3200 Hz: reposo, golpes, reconexión del USB y corte de INT1
+  (un solo hueco, con hora exacta a los dos lados).
+
+El sensor pasa de I2C a **SPI** (recableado, ver Conexiones) y se lee por su
+**FIFO**. El ODR llega a 3200 Hz: el límite de medición sube de ~397 Hz a
+~1590 Hz (a 800 Hz un tono de 500 Hz aparecía reflejado en 293 Hz).
+
+### Cómo se lee
+
+- **SPI1** en PA4–PA7, modo 3 (CPOL = 1, CPHA = 1), **3 MHz** (96 MHz / 32; el
+  sensor admite hasta 5 MHz). CS por GPIO: entre dos transacciones queda en
+  alto ≥ 6 µs (la hoja de datos pide ≥ 5 µs entre lecturas del FIFO por
+  encima de 1,6 MHz). Lecturas por **DMA** (DMA2 Stream0/3, canal 3). Todo
+  eso está en `Core/Src/sensor_spi.c`.
+- **FIFO en modo stream** (32 niveles) con la interrupción **watermark** por
+  INT1: aviso cada `fifo` muestras (**2** por defecto). En cada aviso: lectura
+  de FIFO_STATUS (cuántas hay) y después cada muestra (6 bytes), encadenadas
+  en las interrupciones del DMA. Si el micro se demora, el FIFO guarda hasta
+  ~30 muestras más (~9 ms a 3200 Hz). FIFO lleno = `ovr` y hueco.
+- El watermark es por nivel: si al terminar un lote INT1 sigue en alto (ya
+  se juntaron otras `fifo` muestras) se lanza otro lote enseguida; si no
+  habría flanco y el muestreo se trabaría.
+- **Hora de cada muestra**: la muestra `fifo − 1` del lote es la del flanco
+  de INT1; las demás se ubican con el período nominal.
+- **SPI no avisa si el sensor se desconecta** (no hay acuse de recibo: un
+  sensor ausente se lee como 0x00 o 0xFF). Una vez por segundo se lee DEVID;
+  si no da 0xE5 cuenta `bus_err` y vuelve a buscar el sensor. El mismo
+  chequeo guarda FIFO_STATUS e INT_SOURCE en `diag_fifo_status` y
+  `diag_int_source`, que se leen con el ST-Link sin detener el micro.
+- Buffer de 128 bloques (1,3 s a 3200 Hz).
+
+### Lo que se encontró: la lectura no puede pisar la conversión siguiente
+
+Con el aviso cada 16 muestras (el diseño inicial), a 1600 y 3200 Hz el ruido
+de Z daba 32–43 mg en vez de ~13 mg. No era ruido: en cada ciclo, **la
+muestra (o las dos) que el sensor convertía mientras se leía el lote salía
+desviada en Z** (−20 mg a 800 Hz, hasta −139 mg a 3200 Hz), lo que en el
+espectro es un peine de tonos en la frecuencia de los avisos (199, 397,
+596 Hz…). Ni capacitores de desacople en el GY-291 ni bajar el reloj del SPI
+lo resolvían. Lo que importa es **en qué momento** hay actividad en el bus:
+cada muestra leída ocupa ~30 µs y a 3200 Hz llega una cada 312 µs.
+
+| Aviso cada | z rms a 3200 Hz | Desvío por muestra | Picos |
+|---|---|---|---|
+| 16 | 39,0 mg | −66 y −92 mg | 199, 397… Hz |
+| 8 | 42,6 mg | −67 y −139 mg | 397, 795… Hz |
+| 4 | 13,0 mg | ±1 mg | ninguno |
+| **2** | **13,1 mg** | ±1 mg | ninguno |
+| 1 | 13,3 mg | ±1 mg | ninguno |
+
+Con 4 o menos el lote termina antes de la conversión siguiente. Se eligió
+**2**: ~235 µs de margen ante demoras con la mitad de interrupciones que 1.
+**No subir el aviso, ni agregar trabajo que demore las lecturas (etapa 7),
+sin volver a medir** con `fifo=`. En las etapas 2 a 5 (I2C, una muestra por
+interrupción, siempre en la misma fase) esto no se veía.
+
+### Hora de las muestras tras un corte (encontrado en las pruebas manuales)
+
+Al reconectar INT1 con el FIFO lleno aparecían horas corridas (un bloque
+9 ms fuera de lugar, después huecos falsos de 0,6–0,9 ms). Quedó así:
+
+- Flanco de un aviso recién cumplido (el FIFO tiene entre `fifo` y `fifo`+3
+  muestras): la muestra `fifo` − 1 es la del flanco (exacto).
+- **FIFO lleno**: mientras se lee, el sensor sigue pisando las más viejas y la
+  secuencia deja de ser continua. Se **resincroniza**: se leen y descartan
+  los lotes hasta un aviso exacto (< 1 ms con aviso cada 2). El hueco se
+  marca una vez (con OVR).
+- Cualquier otro lote: **continuidad** (la anterior + un período).
+- Un flanco que llega mientras se lee un lote es viejo y se descarta.
+
+En la PC, `vibrascan_proto.Checker` solo promedia el período con mediciones
+a ±2 % del actual (antes un bloque con la hora mal lo dejaba en 286 µs y cada
+bloque siguiente parecía un hueco) e informa `tiempo` si `t0` retrocede. El
+estado de cada segundo se saltea si el USB está ocupado, sin gastar `seq`.
+
+### Otras observaciones
+
+- A **1600 y 3200 Hz el bit menos significativo es siempre 0**: la
+  resolución efectiva es 7,8 mg/cuenta (en ≤ 800 Hz, 3,9). No figura en la
+  revisión 0 de la hoja de datos; es del sensor (la decodificación es la
+  misma para todos los ODR).
+- A **1600 Hz la media se corre ~30 mg** (z −1,047 g, y −0,041 g, contra
+  −1,017 g y +0,005 g en las demás tasas), con el aviso en 2 también: es del
+  sensor. No afecta al espectro (cada tramo resta su media).
+- Ruido con el aviso en 2 (x/y/z, mg rms): 3200 Hz 9,3/7,6/13,1;
+  1600 Hz 10,0/12,0/13,9; 800 Hz 5,1/4,8/7,6; 400 Hz 3,8/3,5/5,5;
+  100 Hz 2,2/2,1/3,0. La densidad de ruido es la misma en todas las tasas
+  (~230–390 µg/√Hz): el rms crece con la raíz del ancho de banda.
+
+### Comandos nuevos
+
+| Comando | Qué hace |
+|---|---|
+| `odr=1600`, `odr=3200` | además de 100–800 |
+| `fifo=<n>` | muestras por aviso de INT1 (1 a 31, por defecto 2). Diagnóstico: ver arriba |
+| `spi=<kHz>` | reloj del SPI: 3000, 1500, 750 o 375 (por defecto 3000). Diagnóstico |
+
+El estado agrega `bus=spi`, `spi=<kHz>` y `fifo=<n>`; `i2c_err` pasa a
+llamarse `bus_err`. INT1 da `odr/fifo` avisos por segundo (un poco menos:
+un lote puede traer alguna muestra de más) y `tmin`/`tmax` son el intervalo
+entre avisos (`fifo` períodos).
+
+### Probar
+
+    cd pc
+    python etapa3_prueba.py --port COMx --odr 3200 1600 800 400 100
+    python etapa3_prueba.py --port COMx --odr 3200 --seconds 600
+    python captura.py --port COMx --segundos 30 --odr 3200 --nota "tono 500 Hz"
+    python etapa5_prueba.py capturas/captura_<fecha> --frecuencia 500
+
+Sin placa, el driver del sensor se prueba en la PC contra un ADXL345
+simulado:
+
+    gcc -std=c99 -Wall -Wextra -I Core/Inc test_fw/test_adxl345.c Core/Src/adxl345.c -o test_adxl345 && ./test_adxl345
+
 ## Etapa 5 - preproceso y FFT/PSD en Python (aprobada, tag `etapa-5`)
 
 Solo PC; el firmware es el de la etapa 4.
@@ -325,15 +452,20 @@ reconocer.
 
 ## Conexiones
 
-| ADXL345 | Black Pill |
-|---------|------------|
-| VCC     | 3V3        |
-| GND     | GND        |
-| SDA     | PB7        |
-| SCL     | PB6        |
-| CS      | 3V3 (modo I2C) |
-| SDO     | GND (dirección 0x53; a 3V3 es 0x1D, el firmware prueba las dos) |
-| INT1    | PB0 (desde la etapa 2) |
+Desde la etapa 6 (SPI de 4 hilos; módulo GY-291):
+
+| ADXL345 (GY-291) | Black Pill | Función |
+|---------|------------|---|
+| VCC     | 3V3        | con 100 nF y 10 µF a GND junto al módulo |
+| GND     | GND        | |
+| CS      | PA4        | selección (GPIO) |
+| SCL     | PA5        | SCLK |
+| SDA     | PA7        | SDI (MOSI) |
+| SDO     | PA6        | SDO (MISO, con pull-up interno: sin sensor se lee 0xFF) |
+| INT1    | PB0        | watermark del FIFO (desde la etapa 2: DATA_READY) |
+
+Hasta la etapa 5 (I2C): SDA → PB7, SCL → PB6, CS → 3V3, SDO → GND
+(dirección 0x53), INT1 → PB0.
 
 La PC se conecta al USB propio de la Black Pill. El ST-Link solo se usa para
 grabar, conectado con SWDIO, SWCLK y GND (sin su 3,3 V: la placa se alimenta
@@ -349,7 +481,8 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
 
     Core/Src/main.c        generado por CubeMX; solo llama a app_init() y app_loop()
     Core/Src/app.c         lógica de la etapa (lo que cambia de etapa a etapa)
-    Core/Src/adxl345.c     driver del sensor, independiente del bus (I2C hoy, SPI después)
+    Core/Src/adxl345.c     driver del sensor, independiente del bus (SPI desde la etapa 6)
+    Core/Src/sensor_spi.c  bus SPI del sensor: pines, SPI1, DMA y CS (etapa 6)
     Core/Src/trama.c       tramas binarias con CRC (no conoce el transporte)
     Core/Src/usb_link.c    envío a la PC por USB CDC
     USB_DEVICE/, Middlewares/, Drivers/   pila USB y HAL de ST
@@ -367,6 +500,7 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
     pc/etapa5_prueba.py    prueba de aceptación de la etapa 5 (tono de frecuencia conocida)
     pc/test_vibrascan_espectro.py  pruebas del espectro sin placa
     pc/monitor_vivo.py     gráfico en tiempo real y registro de la sesión
+    test_fw/test_adxl345.c prueba del driver en la PC contra un sensor simulado (gcc)
     pc/etapa2_prueba.py    prueba de la etapa 2 (no sirve con el firmware de la 3;
                            la 3 usa sus constantes y funciones)
 
@@ -378,13 +512,15 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
 | 3 | Buffer por bloques y trama binaria con checksum | minutos sin pérdidas (aprobada) |
 | 4 | Captura a archivo y gráfico en tiempo | reposo estable, golpe visible (aprobada) |
 | 5 | Preproceso y FFT/PSD en Python | pico en la frecuencia de una fuente conocida (aprobada) |
-| 6 | SPI a 3200 Hz (con el FIFO del ADXL345) | igual que 2 y 3 |
+| 6 | SPI a 3200 Hz (con el FIFO del ADXL345) | igual que 2 y 3, y un tono de 500 Hz en 500 Hz (aprobada) |
 | 7 | FFT y filtro adaptativo (LMS) en el micro | mismo resultado que en Python |
 
 ## Sobre VibraScan_v2.ioc
 
-Refleja la configuración (I2C1 a 400 kHz, INT1 en PB0 con EXTI0, USB CDC, LED
-en PC13, 96 MHz), pero fue editado a mano y no se probó regenerando desde
+Refleja la configuración hasta la etapa 5 (I2C1 a 400 kHz, INT1 en PB0 con
+EXTI0, USB CDC, LED en PC13, 96 MHz). **SPI1 y su DMA no están en el `.ioc`**:
+se configuran en `sensor_spi.c` (desde la etapa 6), y `main.c` sigue
+inicializando I2C1 en PB6/PB7, que quedan sin conectar. Fue editado a mano y no se probó regenerando desde
 CubeMX. Antes de usar "Generate Code", hacer un commit: los archivos de
 USB_DEVICE no tienen bloques USER CODE y se sobrescriben (se recuperan con
 `git checkout -- USB_DEVICE`).

@@ -125,7 +125,7 @@ def main():
         ax2.set_ylim(0, args.fmax or f[-1])
         ax2.set_xlabel("Tiempo [s]")
         ax2.set_ylabel("Frecuencia [Hz]")
-        ax2.set_title(f"Espectrograma (suma de ejes): tramos de {ve.ESPECTROGRAMA_NPERSEG} muestras, "
+        ax2.set_title(f"Espectrograma (suma de ejes): tramos de {ve.espectrograma_nperseg(esp.fs)} muestras, "
                       f"resolucion {f[1] - f[0]:.1f} Hz; blanco = sin datos")
         fig.colorbar(im, ax=ax2, label="dB (g^2/Hz)")
 

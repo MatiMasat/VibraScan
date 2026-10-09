@@ -155,6 +155,22 @@ class TestChecker(unittest.TestCase):
         _, chk, _ = decode_all(b"".join(a) + p.build_frame(p.TYPE_SAMPLES, 11, blk))
         self.assertEqual((chk.gaps, chk.gap_samples), (1, 1))
 
+    def test_bloque_con_hora_mal_no_arrastra_el_periodo(self):
+        # Lo que paso al reconectar INT1 en la etapa 6: un bloque con t0 corrido
+        # (aca, 9,1 ms tarde) y despues todo normal. Antes, el periodo estimado
+        # quedaba en ~286 us y cada bloque siguiente parecia un hueco de 0,9 ms.
+        frames = make_stream(30)
+        n, t = 30 * 32, 30 * 32 * PERIOD_US
+        samples = [(0, 0, -256)] * 32
+        frames.append(p.build_frame(p.TYPE_SAMPLES, 31, p.build_block_payload(n, t + 9100, 800, 0, samples)))
+        for k in range(1, 40):
+            frames.append(p.build_frame(p.TYPE_SAMPLES, 31 + k,
+                                        p.build_block_payload(n + 32 * k, t + 32 * k * PERIOD_US, 800, 0, samples)))
+        _, chk, _ = decode_all(b"".join(frames))
+        self.assertLessEqual(chk.gaps, 1)                  # a lo sumo el bloque corrido
+        self.assertEqual(chk.time_errors, 1)                # y el que vuelve atras
+        self.assertAlmostEqual(chk.period_us, PERIOD_US, delta=1)
+
     def test_periodo_medido(self):
         # Arranca con 1250 us (800 Hz nominal) y converge al real
         _, chk, _ = decode_all(b"".join(make_stream(200)))

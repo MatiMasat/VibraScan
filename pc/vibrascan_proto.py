@@ -192,6 +192,7 @@ class Checker:
     gaps: int = 0
     gap_samples: int = 0
     overruns: int = 0
+    time_errors: int = 0        # bloques con la hora imposible (retrocede)
     samples: int = 0
     blocks: int = 0
     bad_blocks: int = 0
@@ -271,10 +272,20 @@ class Checker:
                 self.gap_samples += missing
                 self._event("hueco", f"hueco de {max(extra, 0) / 1000:.1f} ms antes de n0={blk.n0} "
                                      f"(~{missing} muestras sin flanco de INT1)", blk, missing)
+            elif extra < -limit:
+                # El tiempo avanzo menos de lo posible: la hora de algun bloque esta
+                # mal (error del firmware), no faltan muestras
+                self.time_errors += 1
+                self._event("tiempo", f"t0 avanzo {dt / 1000:.2f} ms en {steps} muestras antes de n0={blk.n0} "
+                                      f"(se esperaban {expected / 1000:.2f} ms)", blk)
             elif not dn:
-                # Periodo medido (el reloj del sensor no es exacto): promedio lento
+                # Periodo medido (el reloj del sensor no es exacto): promedio lento.
+                # Solo con mediciones plausibles: un bloque con la hora mal no
+                # puede arrastrar la estimacion (si no, cada bloque siguiente
+                # pareceria un hueco y el error no se corregiria nunca).
                 measured = dt / steps
-                self._period += (measured - self._period) * 0.1
+                if abs(measured - self._period) <= CLOCK_TOLERANCE * self._period:
+                    self._period += (measured - self._period) * 0.1
         self._blk = blk
 
     @property

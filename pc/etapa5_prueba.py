@@ -35,8 +35,11 @@ def encendido(cap, f_tono):
     t, f, P = ve.espectrograma(cap, 3)
     datos = np.isfinite(P).any(axis=0)          # sin las columnas vacias (huecos, final)
     t, P = t[datos], P[:, datos]
-    banda = np.abs(f - f_tono) <= BANDA_HZ
-    ref = (np.abs(f - f_tono) > 3 * BANDA_HZ) & (np.abs(f - f_tono) < 30)
+    # Bandas de al menos un bin: con otra resolucion nunca quedan vacias
+    df = f[1] - f[0]
+    ancho = max(BANDA_HZ, df)
+    banda = np.abs(f - f_tono) <= ancho
+    ref = (np.abs(f - f_tono) > 3 * ancho) & (np.abs(f - f_tono) < max(30.0, 12 * ancho))
     with np.errstate(invalid="ignore", divide="ignore"):
         snr = 10 * np.log10(np.nanmax(P[banda], axis=0) / np.nanmedian(P[ref], axis=0))
     on = np.flatnonzero(snr > ENCENDIDO_DB)
