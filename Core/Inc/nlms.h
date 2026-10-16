@@ -3,7 +3,7 @@
   * @brief   Filtro adaptativo NLMS (Normalized Least Mean Squares), etapa 7.
   *
   * Solo la matematica: no conoce HAL, USB ni el sensor (se compila tambien en
-  * la PC, ver test_fw/test_filtro.c). Lo usa filtro.c; la referencia en
+  * la PC, ver test_fw/filtro_pc.c). Lo usa filtro.c; la referencia en
   * Python es nlms() en pc/vibrascan_filtro.py. Justificacion de la eleccion:
   * docs/filtro_adaptativo.md.
   *
