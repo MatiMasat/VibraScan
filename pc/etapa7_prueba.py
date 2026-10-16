@@ -18,6 +18,12 @@ esta). Dos pruebas:
          python captura.py --port COM8 --segundos 30 --odr 3200 --nota "tono 250 Hz volumen 50 %"
          python etapa7_prueba.py tono capturas/captura_<fecha> --frecuencia 250
 
+       El segundo en que se prende el tono se busca solo en el espectrograma.
+       Con un tono muy debil (cerca del piso de ruido) el detector no lo
+       encuentra: se indica a mano con --inicio (mirarlo con
+       espectro.py --espectrograma, o contar los segundos de silencio):
+         python etapa7_prueba.py tono capturas/captura_<fecha> --frecuencia 250 --inicio 5
+
 Donde se ejecuta cada parte: ver la tabla en docs/filtro_adaptativo.md.
 """
 
@@ -102,7 +108,7 @@ def equivalencia(cap):
     return checks
 
 
-def tono(cap, f_tono):
+def tono(cap, f_tono, inicio=None):
     checks = []
     cfg, eje, taps, delta, mu = config(cap)
     if cap.filtro is None:
@@ -111,15 +117,16 @@ def tono(cap, f_tono):
     fs = 1e6 / cap.meta["periodo_us"] if cap.meta.get("periodo_us") else float(cap.meta.get("odr_hz"))
     # El tono se prende despues del silencio inicial: se mide desde ahi (si no,
     # el silencio contaria como tiempo de convergencia)
-    t_on = encendido(cap, f_tono)
+    t_on = encendido(cap, f_tono) if inicio is None else inicio
     if t_on is None:
-        checks.append(("Tono presente", False, f"no aparece en {f_tono:g} Hz en el espectrograma"))
+        checks.append(("Tono presente", False, f"no aparece en {f_tono:g} Hz en el espectrograma "
+                       "(si es muy debil, indicar el encendido con --inicio)"))
         return checks
     n_on = cap.n[min(int(np.searchsorted(cap.t, t_on)), len(cap.n) - 1)]
     i0, i1 = next(((a, b) for a, b in runs(cap) if cap.filtro["n"][a] <= n_on < cap.filtro["n"][b - 1]),
                   max(runs(cap), key=lambda r: r[1] - r[0]))
     j_on = i0 + int(np.searchsorted(cap.filtro["n"][i0:i1], n_on))
-    print(f"  el tono se prende en t = {t_on:.1f} s")
+    print(f"  el tono se prende en t = {t_on:.1f} s" + (" (indicado con --inicio)" if inicio is not None else ""))
     k = j_on + int(ESPERA_S * fs)
     if k >= i1 - 4 * ve.NPERSEG:
         checks.append(("Duracion", False, "captura muy corta"))
@@ -167,6 +174,8 @@ def main():
     parser.add_argument("prueba", choices=("equivalencia", "tono"))
     parser.add_argument("captura", help="Captura (.csv, .json o nombre base)")
     parser.add_argument("--frecuencia", type=float, default=None, help="Frecuencia del tono (prueba tono)")
+    parser.add_argument("--inicio", type=float, default=None,
+                        help="Segundo en que se prende el tono, si el detector no lo encuentra (prueba tono)")
     args = parser.parse_args()
 
     cap = va.cargar(args.captura)
@@ -177,7 +186,7 @@ def main():
     if args.prueba == "tono":
         if args.frecuencia is None:
             parser.error("la prueba tono necesita --frecuencia")
-        checks = tono(cap, args.frecuencia)
+        checks = tono(cap, args.frecuencia, args.inicio)
     else:
         checks = equivalencia(cap)
     print()
