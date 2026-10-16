@@ -20,8 +20,14 @@ Uso:
     python monitor_vivo.py --port COM8 --no-csv       (no guarda las muestras)
     python monitor_vivo.py --port COM8 --ylim-filtro 5  (escala fija del panel del filtro, mg)
 
+    python monitor_vivo.py --port COM8 --psd          (agrega la ventana del espectro)
+
 El cuarto panel es la salida y del filtro adaptativo del micro (etapa 7), en
 mg: el tono realzado. Su escala es automatica salvo con --ylim-filtro.
+
+Con --psd se abre una segunda ventana con la PSD (Welch, como espectro.py) de
+la entrada del filtro y de su salida y, sobre los ultimos PSD_S segundos y
+actualizada PSD_HZ veces por segundo. Se calcula en la PC, no en el micro.
 
 Cerrar la ventana para terminar. El puerto no puede estar abierto por otro
 programa (monitor serie, etapa3_prueba.py) al mismo tiempo.
@@ -46,6 +52,7 @@ import serial
 from matplotlib.animation import FuncAnimation
 
 import vibrascan_archivo as va
+import vibrascan_espectro as ve
 import vibrascan_proto as vp
 from vibrascan_captura import COUNTERS, G_PER_LSB, Captura
 
@@ -57,6 +64,9 @@ EVENT_LABELS = {"seq": "TRAMA PERDIDA", "n": "DESCARTE", "hueco": "HUECO", "crc"
 
 AXES = (("X", "tab:blue"), ("Y", "tab:orange"), ("Z", "tab:green"))
 FS_MAX = 3200           # el buffer alcanza para la ventana completa hasta este ODR
+PSD_S = 5.0             # la PSD en vivo usa los ultimos segundos
+PSD_NPERSEG = 2048      # 1,6 Hz de resolucion a 3200 Hz; ~14 tramos en 5 s
+PSD_HZ = 2              # actualizaciones por segundo (dibujar cuesta mas que calcular)
 CAPTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "capturas")
 
 FREEZE_S = 0.5          # sin muestras durante este tiempo = corte de datos
@@ -117,7 +127,7 @@ class Reader(threading.Thread):
         self.log = log
         self.fs = default_fs
         self.samples = collections.deque(maxlen=maxlen)   # (n, x_g, y_g, z_g)
-        self.filtro = collections.deque(maxlen=maxlen)    # (n, y_g): salida del filtro del micro (etapa 7)
+        self.filtro = collections.deque(maxlen=maxlen)    # (n, y_g, e_g): salida del filtro del micro (etapa 7)
         self.status = {}
         self.lock = threading.Lock()
         self.running = True
@@ -180,7 +190,7 @@ class Reader(threading.Thread):
             with self.lock:
                 if self.filtro and fb.n0 < self.filtro[-1][0]:
                     self.filtro.clear()  # n retrocedio: la placa se reinicio (reconexion)
-                self.filtro.extend((fb.n0 + i, y) for i, y in enumerate(fb.y))
+                self.filtro.extend((fb.n0 + i, y, e) for i, (y, e) in enumerate(zip(fb.y, fb.e)))
         elif frame.ftype == vp.TYPE_STATUS:
             self._on_status(frame.payload.decode("ascii", errors="replace"))
 
@@ -295,6 +305,63 @@ class Reader(threading.Thread):
             self.freezes.append(time.monotonic() - self.frozen_since)
 
 
+def ventana_psd(reader, args, base, log):
+    """Segunda ventana: PSD en vivo de la entrada del filtro (y + e: el eje ya
+    sin la gravedad, exacto, como en espectro.py) y de su salida y."""
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ln_x, = ax.semilogy([], [], color="tab:gray", linewidth=0.8, label="entrada (eje ?)")
+    ln_y, = ax.semilogy([], [], color="tab:red", linewidth=0.8, label="salida y (tono realzado)")
+    ax.set_xlabel("Frecuencia [Hz]")
+    ax.set_ylabel("PSD [g^2/Hz]")
+    ax.grid(True, which="both", alpha=0.3)
+    leyenda = ax.legend(loc="upper right")
+    texto = ax.text(0.01, 0.97, "esperando la salida del filtro...", transform=ax.transAxes,
+                    va="top", family="monospace", fontsize=10)
+    ax.set_title(f"PSD en vivo (Welch: tramos de {PSD_NPERSEG}, Hann, 50 %), ultimos {PSD_S:.0f} s - "
+                 "calculada en la PC")
+    fig.tight_layout()
+
+    def update(_frame):
+        _, status, _, filtro = reader.snapshot()
+        chk = reader.cap.chk
+        fs = 1e6 / chk.period_us if chk is not None and chk.period_us else reader.fs
+        if len(filtro) < PSD_NPERSEG:
+            return
+        f = np.array(filtro[-int(PSD_S * fs):])
+        corte = np.flatnonzero(np.diff(f[:, 0]) != 1)      # solo el ultimo tramo sin huecos
+        if len(corte):
+            f = f[corte[-1] + 1:]
+        if len(f) < PSD_NPERSEG:
+            texto.set_text(f"juntando datos ({len(f) / fs:.1f} s)...")
+            return
+        x = f[:, 1] + f[:, 2]
+        fr, px, m = ve.welch(x, fs, PSD_NPERSEG)
+        _, py, _ = ve.welch(f[:, 1], fs, PSD_NPERSEG)
+        ln_x.set_data(fr, px)
+        ln_y.set_data(fr, py)
+        eje = status.get("eje", "?")
+        leyenda.get_texts()[0].set_text(f"entrada (eje {eje})")
+        ax.set_xlim(0, args.fmax or fr[-1])
+        vis = fr <= (args.fmax or fr[-1])
+        lo = min(px[vis][1:].min(), py[vis][1:].min())
+        hi = max(px[vis].max(), py[vis].max())
+        ax.set_ylim(10 ** math.floor(math.log10(max(lo, 1e-14))), 10 ** math.ceil(math.log10(hi)))
+        i = 1 + int(np.argmax(py[1:]))
+        texto.set_text(f"fs {fs:.1f} Hz, {m} tramos, resolucion {fr[1]:.2f} Hz - "
+                       f"pico de y: {fr[i]:.1f} Hz")
+
+    anim = FuncAnimation(fig, update, interval=1000 // PSD_HZ, cache_frame_data=False)
+
+    def on_key(event):
+        if event.key == "g":
+            path = f"{base}_psd_{int(log.now())}.png"
+            fig.savefig(path, dpi=100)
+            log.write(f"imagen {os.path.basename(path)} guardada (tecla g)")
+
+    fig.canvas.mpl_connect("key_press_event", on_key)
+    return fig, anim
+
+
 def lista_huecos(holes, max_items=10):
     """Duraciones de los primeros huecos y cuantos mas hubo."""
     txt = ", ".join(f"{ms / 1000:.1f} s" for _, ms in holes[:max_items])
@@ -374,6 +441,9 @@ def main():
     parser.add_argument("--ylim", type=float, default=2.0, help="Escala vertical en g, +/- (default: 2)")
     parser.add_argument("--ylim-filtro", type=float, default=None, metavar="MG",
                         help="Escala del panel del filtro en mg, +/- (default: automatica)")
+    parser.add_argument("--psd", action="store_true",
+                        help="Abre una segunda ventana con la PSD en vivo de la entrada y la salida del filtro")
+    parser.add_argument("--fmax", type=float, default=None, help="Con --psd: frecuencia maxima a graficar")
     parser.add_argument("--fs", type=float, default=800.0,
                         help="Tasa de muestreo hasta recibir la primera linea de estado (default: 800)")
     parser.add_argument("--odr", type=int, default=None, metavar="HZ",
@@ -492,6 +562,10 @@ def main():
 
     fig.canvas.mpl_connect("close_event", lambda _e: save_png("al cerrar"))
     anim = FuncAnimation(fig, update, interval=50, cache_frame_data=False)  # noqa: F841
+    if args.psd:
+        fig_psd, anim_psd = ventana_psd(reader, args, base, log)  # noqa: F841
+        # cerrar la ventana principal cierra tambien la del espectro
+        fig.canvas.mpl_connect("close_event", lambda _e: plt.close(fig_psd))
     plt.show()
     reader.close()
     try:
