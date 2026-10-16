@@ -36,7 +36,8 @@ COLORS = ("tab:blue", "tab:orange", "tab:green", "black")
 NOMBRES = ("x", "y", "z", "suma")
 MAX_PICOS = 8
 COLORS_FILTRO = ("tab:gray", "tab:red", "tab:blue")
-NOMBRES_FILTRO = ("entrada", "y (tono realzado)", "e (residuo)")
+# "y" y "e" son la notacion de filtros adaptativos (salida y error), no los ejes del sensor
+NOMBRES_FILTRO = ("entrada (eje {eje})", "salida y (tono realzado)", "residuo e")
 
 
 def tabla(esp, k, max_picos=MAX_PICOS):
@@ -144,6 +145,7 @@ def main():
     if args.filtro:
         filt = psd_filtro(cap, args.nperseg, args.desde, args.hasta)
         cfg = m.get("filtro") or {}
+        nombres_filtro = [nm.format(eje=cfg.get("eje", "?")) for nm in NOMBRES_FILTRO]
         if filt is None:
             print("  --filtro: la captura no tiene <base>_filtro.csv o ningun tramo sin reinicio alcanza "
                   f"{args.nperseg} muestras")
@@ -154,11 +156,11 @@ def main():
                 print("  (sin --desde se incluye la convergencia: para medir, empezar ~3 s despues del tono)")
             if args.tono:
                 ref = None
-                for nombre, v in zip(NOMBRES_FILTRO, filt[4]):
+                for k, (nombre, v) in enumerate(zip(nombres_filtro, filt[4])):
                     snr, amp = vf.snr_banda_db(v, filt[3], args.tono)
-                    ref = snr if ref is None else ref
-                    extra = "" if nombre == NOMBRES_FILTRO[0] else f"  ({snr - ref:+.1f} dB)"
-                    print(f"  {nombre:18}: tono {args.tono:g} Hz {amp * 1000:6.3f} mg rms, "
+                    ref = snr if k == 0 else ref
+                    extra = "" if k == 0 else f"  ({snr - ref:+.1f} dB)"
+                    print(f"  {nombre:24}: tono {args.tono:g} Hz {amp * 1000:6.3f} mg rms, "
                           f"SNR en toda la banda {snr:6.1f} dB{extra}")
 
     nplots = 1 + bool(args.espectrograma) + (filt is not None)
@@ -187,7 +189,7 @@ def main():
         axf = axs[1, 0]
         for k in range(3):
             axf.semilogy(filt[0], filt[1][k], color=COLORS_FILTRO[k], linewidth=0.8 if k == 0 else 0.7,
-                         alpha=0.9, label=NOMBRES_FILTRO[k])
+                         alpha=0.9, label=nombres_filtro[k])
         if args.tono:
             axf.axvline(args.tono, color="black", linestyle=":", linewidth=0.8)
         axf.set_xlim(0, args.fmax or filt[0][-1])

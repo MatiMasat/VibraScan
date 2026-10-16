@@ -18,6 +18,10 @@ Uso:
     python monitor_vivo.py --port COM8 --odr 400      (cambia el ODR del sensor)
     python monitor_vivo.py --port COM8 --rango 16     (cambia el rango: 2, 4, 8 o 16 g)
     python monitor_vivo.py --port COM8 --no-csv       (no guarda las muestras)
+    python monitor_vivo.py --port COM8 --ylim-filtro 5  (escala fija del panel del filtro, mg)
+
+El cuarto panel es la salida y del filtro adaptativo del micro (etapa 7), en
+mg: el tono realzado. Su escala es automatica salvo con --ylim-filtro.
 
 Cerrar la ventana para terminar. El puerto no puede estar abierto por otro
 programa (monitor serie, etapa3_prueba.py) al mismo tiempo.
@@ -113,6 +117,7 @@ class Reader(threading.Thread):
         self.log = log
         self.fs = default_fs
         self.samples = collections.deque(maxlen=maxlen)   # (n, x_g, y_g, z_g)
+        self.filtro = collections.deque(maxlen=maxlen)    # (n, y_g): salida del filtro del micro (etapa 7)
         self.status = {}
         self.lock = threading.Lock()
         self.running = True
@@ -168,6 +173,14 @@ class Reader(threading.Thread):
             self.fs = float(blk.odr) or self.fs
             for i, (x, y, z) in enumerate(blk.samples):
                 self._on_sample(blk.n0 + i, x, y, z)
+        elif frame.ftype == vp.TYPE_FILTRO:
+            fb = vp.parse_filtro(frame)
+            if fb is None:
+                return
+            with self.lock:
+                if self.filtro and fb.n0 < self.filtro[-1][0]:
+                    self.filtro.clear()  # n retrocedio: la placa se reinicio (reconexion)
+                self.filtro.extend((fb.n0 + i, y) for i, y in enumerate(fb.y))
         elif frame.ftype == vp.TYPE_STATUS:
             self._on_status(frame.payload.decode("ascii", errors="replace"))
 
@@ -272,7 +285,7 @@ class Reader(threading.Thread):
 
     def snapshot(self):
         with self.lock:
-            return list(self.samples), dict(self.status), self.losses
+            return list(self.samples), dict(self.status), self.losses, list(self.filtro)
 
     def close(self):
         self.running = False
@@ -359,6 +372,8 @@ def main():
     parser.add_argument("--port", required=True, help="Puerto serie, ej: COM8")
     parser.add_argument("--window", type=float, default=10.0, help="Segundos visibles (default: 10)")
     parser.add_argument("--ylim", type=float, default=2.0, help="Escala vertical en g, +/- (default: 2)")
+    parser.add_argument("--ylim-filtro", type=float, default=None, metavar="MG",
+                        help="Escala del panel del filtro en mg, +/- (default: automatica)")
     parser.add_argument("--fs", type=float, default=800.0,
                         help="Tasa de muestreo hasta recibir la primera linea de estado (default: 800)")
     parser.add_argument("--odr", type=int, default=None, metavar="HZ",
@@ -383,9 +398,10 @@ def main():
         return 2
     reader.start()
 
-    fig, axs = plt.subplots(3, 1, sharex=True, figsize=(10, 7))
+    fig, axs = plt.subplots(4, 1, sharex=True, figsize=(10, 9),
+                            gridspec_kw={"height_ratios": (1, 1, 1, 1.3)})
     lines, labels = [], []
-    for ax, (name, color) in zip(axs, AXES):
+    for ax, (name, color) in zip(axs[:3], AXES):
         (ln,) = ax.plot([], [], color=color, linewidth=1.0)
         lines.append(ln)
         ax.set_ylabel(f"a{name.lower()} [g]")
@@ -393,6 +409,15 @@ def main():
         ax.grid(True, alpha=0.3)
         labels.append(ax.text(0.01, 0.92, "", transform=ax.transAxes, va="top",
                               family="monospace", fontsize=10))
+    # Salida y del filtro adaptativo del micro (etapa 7), en mg: el tono
+    # realzado es de pocos mg y en la escala de los ejes crudos (g) no se ve
+    axf = axs[3]
+    (ln_filtro,) = axf.plot([], [], color="tab:red", linewidth=1.0)
+    axf.set_ylabel("salida y [mg]")
+    axf.set_ylim(-(args.ylim_filtro or 1.0), args.ylim_filtro or 1.0)
+    axf.grid(True, alpha=0.3)
+    label_filtro = axf.text(0.01, 0.92, "esperando la salida del filtro...", transform=axf.transAxes,
+                            va="top", family="monospace", fontsize=10)
     axs[-1].set_xlim(-args.window, 0)
     axs[-1].set_xlabel('Tiempo [s] (0 = ahora)   -   tecla "g": guardar imagen')
     title = fig.suptitle(f"VibraScan - {args.port} - esperando datos...")
@@ -416,8 +441,30 @@ def main():
 
     fig.canvas.mpl_connect("key_press_event", on_key)
 
+    def update_filtro(filtro, status, n_last, fs, width):
+        cfg = (f"filtro={status.get('filtro', '?')} eje={status.get('eje', '?')} taps={status.get('taps', '?')} "
+               f"mu={status.get('mu', '?')}/1000 cpu={int(status.get('filt_us', 0) or 0) / 1e4:.1f} %")
+        if not filtro or n_last - filtro[-1][0] > args.window * fs:
+            ln_filtro.set_data([], [])
+            label_filtro.set_text(cfg + "  - sin salida del filtro"
+                                  + (" (apagado)" if status.get("filtro") == "off" else ""))
+            return
+        f = np.array([s for s in filtro if 0 <= n_last - s[0] <= args.window * fs])
+        tf = (f[:, 0] - n_last) / fs
+        y_mg = f[:, 1] * 1000
+        ln_filtro.set_data(*va.envolvente(tf, y_mg, width))
+        ult = y_mg[tf >= tf[-1] - 1.0]
+        label_filtro.set_text(f"{cfg}  y rms (ultimo 1 s) = {np.sqrt(np.mean(ult ** 2)):.2f} mg")
+        if args.ylim_filtro is None:
+            # Escala automatica en pasos 1-2-5 (no salta con cada cuadro)
+            pico = max(0.5, float(np.abs(y_mg).max()) * 1.1)
+            paso = 10 ** math.floor(math.log10(pico))
+            lim = next(k * paso for k in (1, 2, 5, 10) if k * paso >= pico)
+            if axf.get_ylim()[1] != lim:
+                axf.set_ylim(-lim, lim)
+
     def update(_frame):
-        samples, status, losses = reader.snapshot()
+        samples, status, losses, filtro = reader.snapshot()
         if not samples:
             return
         fs = float(status.get("odr", 0) or 0) or args.fs
@@ -431,6 +478,7 @@ def main():
         width = max(200, int(axs[0].bbox.width))
         for i, ln in enumerate(lines):
             ln.set_data(*va.envolvente(t, arr[:, i + 1], width))
+        update_filtro(filtro, status, n_last, fs, width)
         x, y, z = samples[-1][1:]
         for lbl, v in zip(labels, (x, y, z)):
             lbl.set_text(f"{v:+.3f} g")
