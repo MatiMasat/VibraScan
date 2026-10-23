@@ -87,7 +87,12 @@ hay que ubicar las equivalentes y, si cambian, anotarlas acá.
   ```
   La primera vez va `-import`; después alcanza con `-build`, o `-cleanBuild`
   para una compilación limpia. Salida: `Debug/VibraScan_v2.elf`. Tiene que
-  compilar sin warnings.
+  compilar sin warnings. Las rutas de `-data` e `-import` van con formato
+  de Windows (en Git Bash, `"$(cygpath -w ...)"`): con `C:/...` Eclipse falla
+  con "No file system is defined for scheme: C".
+- Compilar reescribe `.settings/language.settings.xml`: queda modificado y
+  no se commitea. Armar el proyecto en otra PC: sección del mismo nombre en
+  el README.
 - **Grabar** (con el ST-Link conectado):
   ```
   "/f/Sofwares/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe" -c port=SWD mode=UR -w "<.elf>" -v -rst

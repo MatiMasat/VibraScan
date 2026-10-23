@@ -477,6 +477,26 @@ STM32CubeIDE: File > Import > General > Existing Projects into Workspace,
 elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
 "VibraScan_v2 Debug" (el proyecto de Eclipse conserva ese nombre).
 
+## Armar el proyecto en otra PC
+
+    git clone https://github.com/MatiMasat/VibraScan.git
+    cd VibraScan
+    git switch etapa-7          # etapa en curso; main tiene solo etapas aprobadas
+    cd pc
+    pip install -r requirements.txt
+    python -m unittest test_vibrascan_proto test_vibrascan_archivo test_vibrascan_espectro test_vibrascan_filtro
+
+- Programas: Python 3.9 o más nuevo, STM32CubeIDE 2.1.1 (compilar) y
+  STM32CubeProgrammer (grabar con el ST-Link). Opcionales: gcc (MinGW) para
+  la prueba que compila el filtro del micro en la PC (sin gcc se saltea) y
+  scipy para comparar el Welch propio contra scipy (sin scipy se saltea).
+- El puerto COM de la Black Pill cambia de una PC a otra: verlo con
+  `python vibrascan_proto.py --list`.
+- Las capturas (`pc/capturas/`) no están en git: copiarlas aparte si hacen
+  falta.
+- Al compilar, Eclipse reescribe `.settings/language.settings.xml`: aparece
+  como modificado y no se commitea.
+
 ## Estructura
 
     Core/Src/main.c        generado por CubeMX; solo llama a app_init() y app_loop()
