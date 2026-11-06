@@ -5,6 +5,12 @@ con un ADXL345 sobre una Black Pill (STM32F411CEU6). Se construye por etapas;
 cada una se prueba sola antes de sumar la siguiente. Cada etapa aprobada tiene
 un tag en git (`etapa-1`, `etapa-2`, ...).
 
+## Etapa 7 - en curso (rama `etapa-7`)
+
+- Filtro adaptativo NLMS en el micro: [docs/filtro_adaptativo.md](docs/filtro_adaptativo.md).
+- Prueba con un motor (FFT, velocidad del rotor, escalones):
+  [docs/prueba_motor.md](docs/prueba_motor.md).
+
 ## Etapa 6 - SPI a 3200 Hz con el FIFO del ADXL345 (aprobada, tag `etapa-6`)
 
 Aprobada el 2026-10-08 en la placa:
@@ -484,14 +490,16 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
     git switch etapa-7          # etapa en curso; main tiene solo etapas aprobadas
     cd pc
     pip install -r requirements.txt
-    python -m unittest test_vibrascan_proto test_vibrascan_archivo test_vibrascan_espectro test_vibrascan_filtro
+    python -m unittest test_vibrascan_proto test_vibrascan_archivo test_vibrascan_espectro test_vibrascan_filtro test_vibrascan_motor
 
 - Programas: Python 3.9 o más nuevo, STM32CubeIDE 2.1.1 (compilar) y
   STM32CubeProgrammer (grabar con el ST-Link). Opcionales: gcc (MinGW) para
   la prueba que compila el filtro del micro en la PC (sin gcc se saltea) y
   scipy para comparar el Welch propio contra scipy (sin scipy se saltea).
 - El puerto COM de la Black Pill cambia de una PC a otra: verlo con
-  `python vibrascan_proto.py --list`.
+  `python etapa3_prueba.py --list`.
+- Si `python` es otro intérprete sin los paquetes (en la notebook, el de
+  Inkscape), usar `py`.
 - Las capturas (`pc/capturas/`) no están en git: copiarlas aparte si hacen
   falta.
 - Al compilar, Eclipse reescribe `.settings/language.settings.xml`: aparece
@@ -519,6 +527,11 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
     pc/espectro.py         espectro y espectrograma de una captura
     pc/etapa5_prueba.py    prueba de aceptación de la etapa 5 (tono de frecuencia conocida)
     pc/test_vibrascan_espectro.py  pruebas del espectro sin placa
+    pc/vibrascan_filtro.py  referencia en Python del filtro del micro (etapa 7)
+    pc/test_vibrascan_filtro.py  pruebas del filtro sin placa
+    pc/vibrascan_motor.py  velocidad de un motor a partir de su vibración (etapa 7)
+    pc/test_vibrascan_motor.py  pruebas de la velocidad con un motor sintético, sin placa
+    pc/etapa7_prueba.py    prueba de aceptación de la etapa 7 (equivalencia, tono, motor)
     pc/monitor_vivo.py     gráfico en tiempo real y registro de la sesión
     test_fw/test_adxl345.c prueba del driver en la PC contra un sensor simulado (gcc)
     pc/etapa2_prueba.py    prueba de la etapa 2 (no sirve con el firmware de la 3;

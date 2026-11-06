@@ -42,7 +42,7 @@ https://github.com/MatiMasat/VibraScan.git.
 | `etapa-4` | Captura a archivo (CSV de cuentas + JSON, segmentos, reconexión), visor con envolvente, `rango=`, descarte de asentamiento | Aprobada el 2026-10-04 (reposo 30 min, golpes, manual) |
 | `etapa-5` | PSD por Welch propio en numpy (convenciones para la etapa 7), espectrograma, aliasing | Aprobada el 2026-10-04 (tonos de 150/250/350 Hz y 500 Hz reflejado) |
 | `etapa-6` | ADXL345 por SPI con FIFO (aviso cada 2) y DMA, hasta 3200 Hz; `fifo=`, `spi=` | Aprobada el 2026-10-08 (10 min a 3200 Hz, tonos de 500 y 1000 Hz, manual) |
-| (sin rama) | 7: FFT y filtro adaptativo (LMS) en el micro | Próxima |
+| (rama `etapa-7`) | 7: filtro adaptativo NLMS en el micro; prueba con un motor ([docs/prueba_motor.md](docs/prueba_motor.md)) | En curso |
 
 Para la etapa 7: copiar las convenciones del Welch del README (Hann
 periódica, 50 %, media por tramo, escala de densidad). El cálculo en el micro
@@ -73,8 +73,13 @@ un monitor serie ya no sirve para mirar los datos; usar
 
 ## Compilar, grabar y probar
 
-Las rutas son de la PC de escritorio. En otra máquina (por ejemplo la notebook)
-hay que ubicar las equivalentes y, si cambian, anotarlas acá.
+Las rutas son de la PC de escritorio. En otra máquina hay que ubicar las
+equivalentes y, si cambian, anotarlas acá.
+
+En la **notebook** el repo está en `D:\UTN\Beca de servicio\VibraScan\VibraScan`,
+la Black Pill aparece como **COM6** y los scripts se corren con **`py`**: `python`
+es el de Inkscape, sin matplotlib. Las rutas de STM32CubeIDE y CubeProgrammer de la
+notebook todavía no se ubicaron.
 
 - **Compilar sin abrir el IDE** (STM32CubeIDE 2.1.1, build headless, con un
   workspace temporal en el scratchpad):
@@ -100,8 +105,8 @@ hay que ubicar las equivalentes y, si cambian, anotarlas acá.
   Para leer RAM o registros sin resetear se usa `mode=HOTPLUG`.
 - **Probar** (con el USB conectado), desde `pc/`: `etapa3_prueba.py`,
   `captura.py` + `etapa4_prueba.py`, `monitor_vivo.py`, `ver_captura.py`,
-  `espectro.py` y `etapa5_prueba.py` (sin placa:
-  `python -m unittest test_vibrascan_proto test_vibrascan_archivo test_vibrascan_espectro`;
+  `espectro.py`, `etapa5_prueba.py` y `etapa7_prueba.py` (sin placa:
+  `python -m unittest test_vibrascan_proto test_vibrascan_archivo test_vibrascan_espectro test_vibrascan_filtro test_vibrascan_motor`;
   `ver_captura.py --png` y `espectro.py --png` sirven para mirar capturas sin
   abrir ventana). Los
   argumentos están en el README. En la PC de escritorio la Black Pill aparece

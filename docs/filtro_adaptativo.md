@@ -335,6 +335,8 @@ de la banda.
 
 ## 9. Cómo reproducir los resultados
 
+La prueba con un motor real está en [prueba_motor.md](prueba_motor.md).
+
 Desde `pc/`, con la Black Pill por USB (COM8 en la PC de escritorio):
 
 ```bash
