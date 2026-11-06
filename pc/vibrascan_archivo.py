@@ -42,7 +42,9 @@ class Captura:
 
     @property
     def g(self):
-        return self.c * self.escala
+        """Aceleracion en g, con las muestras corruptas reparadas (ver corruptas()).
+        self.c siempre son las cuentas crudas, tal como llegaron."""
+        return reparar(self.c, corruptas(self)) * self.escala
 
     @property
     def modulo(self):
@@ -83,11 +85,34 @@ def cargar(path):
 
 
 def saturadas(cap):
-    """Mascara de muestras con algun eje en el tope del rango (None si no se conoce el rango)."""
+    """Mascara de muestras con algun eje en el tope del rango (None si no se conoce
+    el rango). Una muestra corrupta no esta saturada: su valor no es una medicion."""
     lim = cap.limites()
     if lim is None:
         return None
-    return ((cap.c <= lim[0]) | (cap.c >= lim[1])).any(axis=1)
+    return ((cap.c <= lim[0]) | (cap.c >= lim[1])).any(axis=1) & ~corruptas(cap)
+
+
+def corruptas(cap):
+    """Mascara de muestras imposibles: algun eje fuera de lo que el sensor puede
+    dar. Se mira el rango mas grande de la captura, porque el rango puede cambiar
+    entre segmentos. Sin rango conocido no se marca ninguna."""
+    rangos = [s.get("rango") for s in cap.meta.get("segmentos", [])] + [cap.meta.get("rango_g")]
+    rangos = [r for r in rangos if r in RANGOS]
+    if not rangos:
+        return np.zeros(len(cap.c), dtype=bool)
+    lo, hi = limites_cuentas(max(rangos))
+    return ((cap.c < lo) | (cap.c > hi)).any(axis=1)
+
+
+def reparar(c, malas):
+    """Cuentas con las muestras malas interpoladas entre sus vecinas, en los tres
+    ejes (si un eje salio imposible, los otros tampoco son confiables). Se
+    interpola y no se borra para que las muestras sigan equiespaciadas (FFT)."""
+    if not malas.any() or malas.all():
+        return c
+    idx = np.arange(len(c))
+    return np.column_stack([np.interp(idx, idx[~malas], c[~malas, a]) for a in range(c.shape[1])])
 
 
 def por_ventana(cap, ventana_s=60.0):

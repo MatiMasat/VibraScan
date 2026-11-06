@@ -9,11 +9,13 @@ import os
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import numpy as np
 
 import vibrascan_archivo as va
-from vibrascan_captura import limites_cuentas
+import vibrascan_proto as vp
+from vibrascan_captura import Captura, limites_cuentas, muestra_imposible
 
 FS = 1e6 / 1258   # tasa real a 800 Hz nominales
 
@@ -38,11 +40,63 @@ def reposo(n, rng, ruido=1.3):
     return np.round(c).astype(int)
 
 
+class PuertoFalso:
+    """Lo minimo de serial.Serial para el motor de captura: entrega los bytes dados."""
+
+    def __init__(self, data):
+        self.data = data
+
+    @property
+    def in_waiting(self):
+        return len(self.data)
+
+    def read(self, k):
+        out, self.data = self.data[:k], self.data[k:]
+        return out
+
+    def write(self, _data):
+        pass
+
+    def close(self):
+        pass
+
+
 class TestLimites(unittest.TestCase):
     def test_bits_por_rango(self):
         self.assertEqual(limites_cuentas(2), (-512, 511))
         self.assertEqual(limites_cuentas(4), (-1024, 1023))
         self.assertEqual(limites_cuentas(16), (-4096, 4095))
+
+    def test_muestra_imposible(self):
+        self.assertTrue(muestra_imposible((4100, 0, 238), 16))      # capturas reales con el motor
+        self.assertTrue(muestra_imposible((0, 16384, -7680), 16))
+        self.assertFalse(muestra_imposible((4095, -4096, 0), 16))   # el tope es posible
+        self.assertTrue(muestra_imposible((512, 0, 0), 2))
+        self.assertFalse(muestra_imposible((30000, 0, 0), None))    # rango todavia desconocido
+
+
+class TestCapturaEnVivo(unittest.TestCase):
+    def test_corrupta_se_informa_y_el_csv_la_conserva(self):
+        muestras = [(1, 2, 3)] * vp.BLOCK_SAMPLES
+        muestras[5] = (0, 16384, -7680)
+        flujo = (vp.build_frame(vp.TYPE_STATUS, 0, b"estado=OK etapa=7 odr=3200 rango=16")
+                 + vp.build_frame(vp.TYPE_SAMPLES, 1, vp.build_block_payload(100, 0, 3200, vp.FLAG_FIRST, muestras)))
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch("vibrascan_captura.vp.open_stream", return_value=PuertoFalso(flujo)):
+            base = os.path.join(d, "cap")
+            cap = Captura("COMx", base)
+            eventos = []
+            while cap.ser.in_waiting:
+                eventos += cap.poll()[1]
+            cap.close()
+            self.assertEqual(cap.totals()["muestras_corruptas"], 1)
+            texto = [t for k, t in eventos if k == "corrupta"]
+            self.assertEqual(len(texto), 1)
+            self.assertIn("n=105", texto[0])
+            leida = va.cargar(base)
+            self.assertEqual(leida.c[5].tolist(), [0, 16384, -7680])
+            self.assertEqual(leida.meta["perdidas"]["muestras_corruptas"], 1)
+            self.assertTrue(va.corruptas(leida)[5])
 
 
 class TestEnvolvente(unittest.TestCase):
@@ -122,6 +176,39 @@ class TestCaptura(unittest.TestCase):
         escribir(self.base, t, c, rango=2)
         cap = va.cargar(self.base)
         self.assertEqual(int(va.saturadas(cap).sum()), 3)
+
+    def test_corrupta_no_es_saturada_ni_golpe(self):
+        # Los valores reales de la prueba del motor (+/-16 g): y = 16384 no existe
+        n = 4000
+        c = reposo(n, self.rng)
+        c[2000] = (0, 16384, -7680)
+        c[2001] = (520, 16384, 513)
+        c[3000, 2] = 4095           # este si es el tope del rango
+        escribir(self.base, np.arange(n) / FS, c, rango=16)
+        cap = va.cargar(self.base)
+        self.assertEqual(np.flatnonzero(va.corruptas(cap)).tolist(), [2000, 2001])
+        self.assertEqual(np.flatnonzero(va.saturadas(cap)).tolist(), [3000])
+        self.assertEqual(cap.c[2000, 1], 16384)                 # lo crudo no se toca
+        self.assertLess(abs(cap.g[2000, 1]), 0.2)               # lo que se analiza, si
+        self.assertLess(abs(cap.g[2001, 2] + 262 * 0.0039), 0.1)
+        self.assertEqual(len(va.golpes(cap)), 1)                # solo el tope: no hay golpe de 64 g
+        self.assertLess(va.golpes(cap)[0].pico_g, 17)
+
+    def test_corrupta_usa_el_rango_mas_grande(self):
+        # 2000 cuentas son imposibles a 2 g pero validas a 16 g: si el rango cambio
+        # en la captura, no se pueden marcar
+        n = 1000
+        c = reposo(n, self.rng)
+        c[10, 2] = 2000
+        escribir(self.base, np.arange(n) / FS, c, rango=2, extra={"segmentos": [{"seg": 0, "rango": 16}]})
+        self.assertFalse(va.corruptas(va.cargar(self.base)).any())
+
+    def test_sin_rango_no_marca_corruptas(self):
+        n = 100
+        c = reposo(n, self.rng)
+        c[10, 2] = 30000
+        escribir(self.base, np.arange(n) / FS, c, rango=None)
+        self.assertFalse(va.corruptas(va.cargar(self.base)).any())
 
     def test_tramos_por_segmento(self):
         n = 3000

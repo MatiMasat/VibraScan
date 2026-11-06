@@ -39,6 +39,7 @@ META_S = 10.0               # cada cuanto se reescribe el JSON
 MAX_EVENTS = 2000           # eventos guardados en el JSON
 DISCONTINUIDADES = ("seq", "n", "hueco", "odr", "tiempo")   # eventos de vp.Checker que abren segmento
 COUNTERS = ("ovr", "bus_err", "drop", "stall", "bfull", "hueco")   # bus_err: i2c_err hasta la etapa 5
+CORRUPTAS_EVENTOS = 20      # muestras imposibles que se informan una por una
 
 
 def limites_cuentas(rango):
@@ -46,6 +47,16 @@ def limites_cuentas(rango):
     10 bits a 2 g, un bit mas por cada duplicacion del rango."""
     bits = 10 + RANGOS.index(rango)
     return -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+
+
+def muestra_imposible(muestra, rango):
+    """True si algun eje esta fuera de lo que el sensor puede dar en ese rango:
+    la lectura se corrompio (etapa 7: pasa al prender o apagar un motor). Una
+    corrupcion que da un valor posible no se puede detectar asi."""
+    if rango not in RANGOS:
+        return False
+    lo, hi = limites_cuentas(rango)
+    return any(v < lo or v > hi for v in muestra)
 
 
 class _Regresion:
@@ -103,6 +114,7 @@ class Captura:
         self.odr = self.rango = None
         self.tmin = self.tmax = None
         self.samples = 0
+        self.corruptas = 0
         self.reconexiones = 0
         self.events = []
         self._pending = []
@@ -274,9 +286,23 @@ class Captura:
         if self.csv:
             self.csv.write("".join(f"{self.seg},{blk.n0 + i},{t_base + i * period / 1e6:.6f},{x},{y},{z}\n"
                                    for i, (x, y, z) in enumerate(blk.samples)))
+        self._corruptas(blk)
         self.reg.add(blk.n0, t_ext)
         self.segments[-1]["muestras"] += len(blk.samples)
         self.samples += len(blk.samples)
+
+    def _corruptas(self, blk):
+        """Informa las muestras imposibles. El CSV las guarda igual (datos crudos):
+        vibrascan_archivo las repara para el analisis."""
+        for i, s in enumerate(blk.samples):
+            if not muestra_imposible(s, self.rango):
+                continue
+            self.corruptas += 1
+            if self.corruptas <= CORRUPTAS_EVENTOS:
+                self._event("corrupta", f"muestra imposible en n={blk.n0 + i}: {tuple(s)} cuentas "
+                                        f"con rango {self.rango} g")
+                if self.corruptas == CORRUPTAS_EVENTOS:
+                    self._event("corrupta", "no se informan mas una por una; el total queda en el resumen")
 
     def _close_regression(self):
         if self.reg is not None and self.segments:
@@ -313,6 +339,7 @@ class Captura:
             t["muestras_en_huecos"] += chk.gap_samples
             t["bloques_con_overrun"] += chk.overruns
         t["reconexiones"] = self.reconexiones
+        t["muestras_corruptas"] = self.corruptas
         return t
 
     def period(self):

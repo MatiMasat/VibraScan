@@ -40,6 +40,11 @@ def resumen(cap, gs):
           f"huecos={p.get('huecos')} crc={p.get('crc_mal')} reconexiones={p.get('reconexiones')}")
     for s in m.get("segmentos", [])[1:]:
         print(f"  segmento {s['seg']} desde {s['t_s']:.3f} s: {s['motivo']}")
+    malas = va.corruptas(cap)
+    if malas.any():
+        print(f"  CORRUPTAS: {int(malas.sum())} muestras imposibles, en t = "
+              + ", ".join(f"{v:.3f}" for v in cap.t[malas][:10])
+              + " s (interpoladas para graficar y analizar; el CSV las conserva)")
     sat = va.saturadas(cap)
     if sat is not None and sat.any():
         print(f"  SATURACION: {int(sat.sum())} muestras en el tope de +/-{m.get('rango_g')} g "

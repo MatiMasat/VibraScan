@@ -54,13 +54,13 @@ from matplotlib.animation import FuncAnimation
 import vibrascan_archivo as va
 import vibrascan_espectro as ve
 import vibrascan_proto as vp
-from vibrascan_captura import COUNTERS, G_PER_LSB, Captura
+from vibrascan_captura import COUNTERS, G_PER_LSB, Captura, muestra_imposible
 
 RATE_TOLERANCE = 0.05   # sps puede diferir 5 % del ODR nominal
 EVENT_LABELS = {"seq": "TRAMA PERDIDA", "n": "DESCARTE", "hueco": "HUECO", "crc": "CRC",
                 "puerto_perdido": "PUERTO PERDIDO", "reconexion": "RECONEXION", "odr": "ODR",
                 "rango": "RANGO", "estado": "ESTADO NO OK", "inicio": "inicio", "tiempo": "TIEMPO",
-                "respuesta": "respuesta del firmware", "ovr": "OVERRUN"}
+                "respuesta": "respuesta del firmware", "ovr": "OVERRUN", "corrupta": "CORRUPTA"}
 
 AXES = (("X", "tab:blue"), ("Y", "tab:orange"), ("Z", "tab:green"))
 FS_MAX = 3200           # el buffer alcanza para la ventana completa hasta este ODR
@@ -182,7 +182,10 @@ class Reader(threading.Thread):
                 return
             self.fs = float(blk.odr) or self.fs
             for i, (x, y, z) in enumerate(blk.samples):
-                self._on_sample(blk.n0 + i, x, y, z)
+                # Una muestra imposible no se grafica ni cuenta como golpe (ya la
+                # informo el motor de captura, evento "corrupta")
+                if not muestra_imposible((x, y, z), self.cap.rango):
+                    self._on_sample(blk.n0 + i, x, y, z)
         elif frame.ftype == vp.TYPE_FILTRO:
             fb = vp.parse_filtro(frame)
             if fb is None:
@@ -388,6 +391,7 @@ def summarize(reader, log, window):
     log.raw(f"  reconexiones del USB: {c['reconexiones']}")
     log.raw(f"  huecos de INT1: {c['huecos']} (~{c['muestras_en_huecos']} muestras)"
             + (": " + lista_huecos(r.holes) if r.holes else ""))
+    log.raw(f"  muestras corruptas (valores imposibles): {c['muestras_corruptas']}")
     log.raw(f"  cortes de datos: {len(r.freezes)}"
             + (f" (el mas largo {max(r.freezes):.2f} s)" if r.freezes else ""))
     if r.first_counters is not None:
