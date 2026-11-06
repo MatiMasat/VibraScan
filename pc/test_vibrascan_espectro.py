@@ -139,11 +139,11 @@ class TestCaptura(unittest.TestCase):
     def tearDown(self):
         self.dir.cleanup()
 
-    def escribir(self, x_g, seg=None, segmentos=None):
+    def escribir(self, x_g, seg=None, segmentos=None, t=None):
         n = len(x_g)
         c = np.column_stack((np.round(self.rng.normal(3, 1.3, n)), np.round(self.rng.normal(13, 1.3, n)),
                              np.round(x_g / 0.0039))).astype(int)
-        t = np.arange(n) / FS
+        t = np.arange(n) / FS if t is None else t
         escribir(self.base, t, c, seg=seg, extra={"periodo_us": 1e6 / FS, "segmentos": segmentos or
                                                   [{"seg": 0, "odr": 800, "periodo_us": 1e6 / FS}]})
         return va.cargar(self.base)
@@ -173,10 +173,48 @@ class TestCaptura(unittest.TestCase):
         fs2 = FS * 1.002
         x = np.concatenate((tono(h, 300.0, 0.01), tono(h, 300.0, 0.01, fs=fs2))) - 1.0
         segs = [{"seg": 0, "odr": 800, "periodo_us": 1e6 / FS}, {"seg": 1, "odr": 800, "periodo_us": 1e6 / fs2}]
-        esp = ve.psd(self.escribir(x, seg=np.repeat([0, 1], h), segmentos=segs))
+        t = np.concatenate((np.arange(h) / FS, h / FS + np.arange(h) / fs2))
+        esp = ve.psd(self.escribir(x, seg=np.repeat([0, 1], h), segmentos=segs, t=t))
         pks = ve.picos(esp.f, esp.psd[2])
         self.assertAlmostEqual(pks[0].f, 300.0, delta=0.05)
         self.assertTrue(all(abs(p.f - 300.0) < 0.3 or p.db < pks[0].db - 20 for p in pks[1:]))
+
+    def captura_con_deriva(self, f_tono, fs_ini=3172.0, fs_fin=3165.0, dur=240.0):
+        """Tono real de frecuencia fija, muestreado por un reloj que se atrasa de
+        a poco: la tasa va de fs_ini a fs_fin, como con el sensor sobre el motor."""
+        n = int(dur * (fs_ini + fs_fin) / 2)
+        fs_t = fs_ini + (fs_fin - fs_ini) * np.arange(n) / n
+        t = np.concatenate(([0.0], np.cumsum(1 / fs_t[:-1])))
+        x = 0.5 * np.sqrt(2) * np.sin(2 * np.pi * f_tono * t) + self.rng.normal(0, 0.01, n)
+        fs_media = (n - 1) / t[-1]
+        cap = self.escribir(x - 1.0, t=t, segmentos=[{"seg": 0, "odr": 3200, "rango": 16, "periodo_us": 1e6 / fs_media}])
+        return cap, t[-1]
+
+    def test_deriva_del_reloj(self):
+        # Con la tasa del segmento, el tono parece moverse (0,1 % = 0,5 Hz a 500 Hz)
+        cap, dur = self.captura_con_deriva(500.0)
+        for desde, hasta in ((0, dur / 4), (3 * dur / 4, dur), (0, dur)):
+            esp = ve.psd(cap, desde=desde, hasta=hasta)
+            pk = ve.picos(esp.f, esp.psd[2])[0]
+            self.assertAlmostEqual(pk.f, 500.0, delta=0.05, msg=f"{desde:.0f}-{hasta:.0f} s")
+            self.assertAlmostEqual(pk.amp_g, 0.5, delta=0.5 * 0.03)
+            np.testing.assert_allclose(esp.parseval()[2], 1.0, atol=0.02)
+        self.assertLess(esp.tasas[0], 3166.0)
+        self.assertGreater(esp.tasas[1], 3171.0)
+
+    def test_sin_tasa_local_el_tono_se_corre(self):
+        # Por que hace falta: mismo caso calculado con una sola tasa (la de antes)
+        cap, dur = self.captura_con_deriva(500.0)
+        i = cap.t >= 3 * dur / 4
+        f, p, _ = ve.welch(cap.g[i, 2], 1e6 / cap.meta["segmentos"][0]["periodo_us"])
+        self.assertGreater(ve.picos(f, p)[0].f - 500.0, 0.3)
+
+    def test_tasa_no_creible_usa_la_del_segmento(self):
+        t = np.arange(10000) / 800.0
+        t[6000:] += 5.0                         # salto de reloj dentro de un tramo
+        ft = ve.tasas_tramos(t, 800.0, 4096)
+        self.assertTrue((ft == 800.0).any())
+        self.assertTrue(np.abs(ft / 800.0 - 1).max() <= ve.TASA_TOL)
 
     def test_espectrograma(self):
         # Tono solo en la segunda mitad; hueco entre segmentos en el medio

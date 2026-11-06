@@ -78,7 +78,8 @@ def psd_filtro(cap, nperseg=ve.NPERSEG, desde=None, hasta=None):
         if j1 - j0 < nperseg:
             continue
         y, e = cap.filtro["y"][j0:j1], cap.filtro["e"][j0:j1]
-        res = [ve.welch(v, fs, nperseg) for v in (y + e, y, e)]
+        ft = ve.tasas_tramos(t[j0:j1], fs, nperseg)
+        res = [ve.welch(v, fs, nperseg, fs_tramos=ft) for v in (y + e, y, e)]
         m = res[0][2]
         p = np.vstack([r[1] for r in res])
         acc = m * p if acc is None else acc + m * p
@@ -124,7 +125,8 @@ def main():
     t1 = args.hasta if args.hasta is not None else cap.t[-1]
     print(f"{os.path.basename(cap.base)}  nota: {m.get('nota') or '-'}")
     print(f"  tramo {t0:.1f}-{t1:.1f} s, segmentos {esp.segmentos}, fs medida {esp.fs:.2f} Hz "
-          f"(odr {m.get('odr_hz')}), {esp.tramos} tramos de {esp.nperseg} muestras, resolucion {esp.df:.3f} Hz")
+          f"(odr {m.get('odr_hz')}; por tramo {esp.tasas[0]:.2f}-{esp.tasas[1]:.2f}), "
+          f"{esp.tramos} tramos de {esp.nperseg} muestras, resolucion {esp.df:.3f} Hz")
     print("  Parseval (integral de la PSD / varianza) x/y/z: " + "/".join(f"{v:.3f}" for v in esp.parseval())
           + "  (~1 si la senal es estacionaria; menos con golpes)")
     banda = (esp.f > 0.05 * esp.fs) & (esp.f < 0.48 * esp.fs)

@@ -13,7 +13,8 @@ Convenciones (las mismas que tendra que usar el micro):
                 Parseval: la integral de P es la varianza de la senal.
 
 Se calcula dentro de cada segmento de la captura (nunca a traves de un hueco)
-y con la tasa medida de cada segmento, no con el ODR nominal.
+y con la tasa medida de cada tramo, no con el ODR nominal: el reloj del sensor
+deriva con la temperatura (-0,19 % en 4 minutos sobre un motor, etapa 7).
 """
 
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ SOLAPE = 0.5
 PICO_BINS = 3           # la amplitud de un tono se integra en +/-3 bins
 PICO_MIN_DB = 10.0      # un pico tiene que superar al piso local en esto
 PISO_VENTANA_HZ = 20.0  # el piso local es la mediana de la PSD en +/- esto
+TASA_TOL = 0.02         # una tasa local mas lejos que esto de la del segmento no se usa
 EJES = ("x", "y", "z")
 
 
@@ -33,9 +35,11 @@ def hann(n):
     return 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(n) / n)
 
 
-def welch(x, fs, nperseg=NPERSEG, solape=SOLAPE):
+def welch(x, fs, nperseg=NPERSEG, solape=SOLAPE, fs_tramos=None):
     """PSD de una senal equiespaciada. Devuelve (f, P, tramos) o None si es mas
-    corta que un tramo. P es de una cara, en unidades^2/Hz."""
+    corta que un tramo. P es de una cara, en unidades^2/Hz. Con fs_tramos (la
+    tasa de cada tramo, ver tasas_tramos), cada tramo se calcula con su tasa y
+    se interpola sobre la grilla de fs."""
     x = np.asarray(x, dtype=float)
     if len(x) < nperseg:
         return None
@@ -44,7 +48,13 @@ def welch(x, fs, nperseg=NPERSEG, solape=SOLAPE):
     frames = frames - frames.mean(axis=1, keepdims=True)
     w = hann(nperseg)
     spec = np.abs(np.fft.rfft(frames * w, axis=1)) ** 2
-    p = spec.mean(axis=0) / (fs * (w * w).sum())
+    if fs_tramos is None:
+        p = spec.mean(axis=0) / (fs * (w * w).sum())
+    else:
+        f = np.fft.rfftfreq(nperseg, 1 / fs)
+        k = np.arange(len(f))
+        p = np.mean([np.interp(f, k * fi / nperseg, s) / fi for s, fi in zip(spec, fs_tramos)],
+                    axis=0) / (w * w).sum()
     if nperseg % 2 == 0:
         p[1:-1] *= 2        # Nyquist (ultimo bin) aparece una sola vez
     else:
@@ -61,6 +71,7 @@ class Espectro:
     tramos: int             # tramos de Welch promediados
     segmentos: list         # numeros de segmento usados
     varianza: np.ndarray    # (3,) varianza de cada eje (tramos sin media), para Parseval
+    tasas: tuple = None     # tasa local minima y maxima de los tramos, Hz
 
     @property
     def df(self):
@@ -80,11 +91,25 @@ def _fs_segmento(cap, seg, i0, i1):
     return (i1 - i0 - 1) / (cap.t[i1 - 1] - cap.t[i0])      # ultimo recurso: el reloj de t_s
 
 
+def tasas_tramos(t, fs, nperseg=NPERSEG, solape=SOLAPE):
+    """Tasa de muestreo de cada tramo de Welch: recta de t contra el indice de la
+    muestra (t viene del reloj del micro). Un tramo cuya tasa no es creible (mas
+    de TASA_TOL lejos de fs) usa fs."""
+    step = nperseg - int(nperseg * solape)
+    frames = np.lib.stride_tricks.sliding_window_view(t, nperseg)[::step]
+    k = np.arange(nperseg) - (nperseg - 1) / 2
+    periodo = (frames - frames.mean(axis=1, keepdims=True)) @ k / (k * k).sum()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tasas = 1 / periodo
+    return np.where(np.abs(tasas / fs - 1) <= TASA_TOL, tasas, fs)
+
+
 def psd(cap, nperseg=NPERSEG, desde=None, hasta=None):
     """PSD de una captura (vibrascan_archivo.Captura), por segmento y promediada."""
     t0 = cap.t[0] if desde is None else desde
     t1 = cap.t[-1] if hasta is None else hasta
-    partes = []
+    partes, tasas = [], []
+    gs = cap.g
     for i0, i1 in cap.tramos():
         seg = int(cap.seg[i0])
         fs = _fs_segmento(cap, seg, i0, i1)
@@ -92,8 +117,10 @@ def psd(cap, nperseg=NPERSEG, desde=None, hasta=None):
         if j1 - j0 < nperseg:
             continue
         odr = next((s.get("odr") for s in cap.meta.get("segmentos", []) if s.get("seg") == seg), None)
-        g = cap.g[j0:j1]
-        res = [welch(g[:, a], fs, nperseg) for a in range(3)]
+        g = gs[j0:j1]
+        ft = tasas_tramos(cap.t[j0:j1], fs, nperseg)
+        res = [welch(g[:, a], fs, nperseg, fs_tramos=ft) for a in range(3)]
+        tasas += [ft.min(), ft.max()]
         partes.append((seg, odr, fs, res, g))
     if not partes:
         raise ValueError(f"ningun segmento tiene {nperseg} muestras en el tramo pedido")
@@ -115,7 +142,7 @@ def psd(cap, nperseg=NPERSEG, desde=None, hasta=None):
         total += m
     p = acc / total
     return Espectro(f, np.vstack((p, p.sum(axis=0))), ref[2], nperseg, total,
-                    [s for s, *_ in partes], var / total)
+                    [s for s, *_ in partes], var / total, (float(min(tasas)), float(max(tasas))))
 
 
 def _varianza_tramos(g, nperseg):
