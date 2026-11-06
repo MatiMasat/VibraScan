@@ -20,7 +20,7 @@ con una medición independiente** (tacómetro o cámara lenta).
 
 El montaje importa. En la segunda sesión el sensor cambió de inclinación hasta
 ~35°; en la tercera, ya firme, el piso de ruido de Z con el motor andando bajó
-de 4,1 a 1,1 mg/√Hz y la vibración total, de 1,6 a 0,8 g rms.
+de 4,2 a 1,1 mg/√Hz y la vibración total, de 1,6 a 0,8 g rms.
 
 ## 2. Qué se ve en la FFT
 
@@ -91,9 +91,12 @@ cargado, que gira más cerca de la velocidad sincrónica.
 
 ![Velocidad contra el tiempo](img/motor_velocidad.png)
 
-- **Al arrancar, la velocidad sube sola** de 1434 a ~1455 rpm en el primer minuto.
-  Pasa en todas las sesiones largas. Es compatible con el calentamiento del motor
-  (menos rozamiento), pero la causa no se comprobó.
+- **Al arrancar, la velocidad sube sola** de ~1434 a ~1455 rpm en el primer minuto.
+  Pasa en todos los arranques de las cuatro sesiones, y empieza siempre en el mismo
+  valor, incluso el de `_164410` que vino solo 110 s después de apagar el motor. Por
+  eso **no parece ser el calentamiento del motor**, que no se enfriaría en ese tiempo:
+  se parece más a algo que se asienta en cada arranque (por ejemplo, la carga que
+  mueve el motor). La causa no se conoce.
 - **Con carga en el eje** la vibración llega a 1,3 g rms (contra ~0,7 g) y el espectro
   se vuelve irregular. Aparecen caídas de velocidad de 10–15 rpm, por ejemplo de
   88 a 90 s y de 96 a 100 s. **Los instantes de la carga no se registraron**, así
