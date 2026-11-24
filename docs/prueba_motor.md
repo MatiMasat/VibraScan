@@ -243,7 +243,7 @@ Cambio respecto de la marcha normal (25–75 s y 20–72 s; PSD de la suma de ej
 - Este análisis usa la FFT de la PC, no la salida del filtro NLMS.
 - Velocidad: en octubre daba ~1435–1460 rpm y el 6/11 ~1473 rpm. No se sabe por qué. La
   prueba se describió como de baja velocidad, pero las mediciones no muestran un motor más lento.
-- La sesión `monitor_20261106_170733` (baja velocidad, sin detalle de lo que se hizo) **no
+- La sesión `monitor_20261106_170733` (sin registro de lo que se hizo; el puerto USB se perdió dos veces) **no
   aprueba**: da 895–1318 rpm con solo 3 bandas por ventana, 16 de 26 ventanas medidas y ningún
   tramo estable. Esas velocidades no son confiables y la sesión no se usó. Tampoco se usó
   `monitor_20261106_172931` como resultado: hubo 754 muestras descartadas al inicio y no se
