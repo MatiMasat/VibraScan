@@ -181,7 +181,8 @@ python etapa7_prueba.py motor capturas/captura_<fecha> --rpm-nominal 1350
 
 1. Al menos 5 s con el motor apagado.
 2. Cada velocidad, **al menos 20 s estable** (cada una da unas 8 mediciones). Conviene
-   empezar con ~1 minuto a velocidad máxima, para pasar el calentamiento.
+   empezar con ~1 minuto a velocidad máxima, porque al arrancar la
+   velocidad sigue subiendo.
 3. Anotar en `--nota` las velocidades y el orden.
 4. Apagar y dejar unos 5 s más.
 
@@ -196,7 +197,62 @@ python etapa7_prueba.py motor capturas/captura_<fecha> --rpm-nominal 1350 --esca
 Dos velocidades a menos de 20 rpm se cuentan como un solo escalón. Si a una velocidad
 baja la vibración cae por debajo de 100 mg rms, ese tramo se toma como motor apagado.
 
-## 7. Pendiente
+## 7. Movimiento del apoyo del eje (2026-11-06)
+
+Se movió a mano el apoyo del extremo opuesto del eje, dos veces (P1 y P2) en cada una de
+dos capturas de 200 s: `captura_20261106_174209` y `captura_20261106_175155` (3200 Hz,
+±16 g). Secuencia: apagado, marcha normal, P1, pausa, P2, pausa, apagado. Las dos salieron
+con 0 pérdidas, 0 muestras corruptas y 0 saturadas, y `etapa7_prueba.py equivalencia` aprueba
+(diferencia máxima con Python: 7,2 µg).
+
+![Línea de rotación y vibración total](img/motor_apoyo.png)
+
+Cambio respecto de la marcha normal (25–75 s y 20–72 s; PSD de la suma de ejes):
+
+| Medida | `174209` P1 (85–94 s) | `174209` P2 (135–149 s) | `175155` P1 (78–100 s) | `175155` P2 (133–151 s) |
+|---|---|---|---|---|
+| **Línea de ~24,5 Hz (1×)** | **+7,4 dB** | **+5,8 dB** | **+15,9 dB** | **+16,7 dB** |
+| Línea de 249,1 Hz | −16,6 dB | −12,9 dB | −9,0 dB | −10,8 dB |
+| Banda de 124,5 Hz | −14,1 dB | −10,6 dB | −2,5 dB | −12,8 dB |
+| Línea de 224,6 Hz | +7,2 dB | +13,9 dB | −0,6 dB | −6,8 dB |
+| Línea de 100 Hz | +1,6 dB | +2,3 dB | −0,4 dB | −3,6 dB |
+| Vibración total (marcha normal: ~350 mg rms) | −3,1 dB | −1,3 dB | −0,2 dB | −4,0 dB |
+
+- **La línea de ~24,5 Hz subió en las cuatro perturbaciones** y la de 249,1 Hz bajó en las
+  cuatro. Las demás no cambian siempre en el mismo sentido.
+- **La vibración total no es un indicador consistente.** En el promedio de esos tramos baja
+  (entre 0,2 y 4,0 dB), pero durante P1 tuvo subidas transitorias: ~505 mg rms en `174209` y
+  ~400 mg rms en `175155`.
+- **La velocidad estimada no cambió de forma apreciable** (1469–1476 rpm, mediana 1473).
+- **Al soltar el apoyo no siempre se vuelve al mismo estado:** en `175155`, entre P1 y P2, la
+  línea quedó unos 4 dB sobre su nivel inicial; en `174209` la vibración terminó 1,0 dB por encima.
+
+![Espectrograma de la captura 175155](img/motor_apoyo_espectrograma.png)
+
+### Alcance
+
+- **Conclusión:** el espectro muestra un cambio repetible en la condición del eje que la
+  vibración total no muestra de forma consistente.
+- **No se diagnostica la causa.** Un cambio de alineación es una hipótesis: no se midieron la
+  alineación, la fuerza ni el desplazamiento del apoyo.
+- **Los límites de los tramos se eligieron mirando los datos** (los avisos al operador tenían
+  varios segundos de demora) y las líneas se eligieron después de verlas. Son cuatro
+  perturbaciones de un solo día: no hay una tasa de detección validada.
+- **En P1 de `174209` la tabla usa solo 85–94 s.** De ~98 a 104 s la línea llega a +18 dB, y
+  no se sabe qué cambió en la maniobra.
+- Este análisis usa la FFT de la PC, no la salida del filtro NLMS.
+- Velocidad: en octubre daba ~1435–1460 rpm y el 6/11 ~1473 rpm. No se sabe por qué. La
+  prueba se describió como de baja velocidad, pero las mediciones no muestran un motor más lento.
+- La sesión `monitor_20261106_170733` (baja velocidad, sin detalle de lo que se hizo) **no
+  aprueba**: da 895–1318 rpm con solo 3 bandas por ventana, 16 de 26 ventanas medidas y ningún
+  tramo estable. Esas velocidades no son confiables y la sesión no se usó. Tampoco se usó
+  `monitor_20261106_172931` como resultado: hubo 754 muestras descartadas al inicio y no se
+  registraron las maniobras.
+
+## 8. Pendiente
+
+- **Repetir el movimiento del apoyo con desplazamientos medidos**, fijando antes las líneas y
+  los umbrales a evaluar.
 
 - **Confirmar la velocidad con una medición independiente:** filmar una marca en el
   eje a 240 cuadros/s (a 24 vueltas/s son ~10 cuadros por vuelta) o un tacómetro.
