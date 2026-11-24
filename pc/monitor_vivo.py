@@ -60,7 +60,8 @@ RATE_TOLERANCE = 0.05   # sps puede diferir 5 % del ODR nominal
 EVENT_LABELS = {"seq": "TRAMA PERDIDA", "n": "DESCARTE", "hueco": "HUECO", "crc": "CRC",
                 "puerto_perdido": "PUERTO PERDIDO", "reconexion": "RECONEXION", "odr": "ODR",
                 "rango": "RANGO", "estado": "ESTADO NO OK", "inicio": "inicio", "tiempo": "TIEMPO",
-                "respuesta": "respuesta del firmware", "ovr": "OVERRUN", "corrupta": "CORRUPTA"}
+                "respuesta": "respuesta del firmware", "ovr": "OVERRUN", "corrupta": "CORRUPTA",
+                "reposo": "REPOSO"}
 
 AXES = (("X", "tab:blue"), ("Y", "tab:orange"), ("Z", "tab:green"))
 FS_MAX = 3200           # el buffer alcanza para la ventana completa hasta este ODR
@@ -121,9 +122,9 @@ class Reader(threading.Thread):
     """Lee con el motor de captura en segundo plano (graba, se reconecta), guarda
     las ultimas muestras para el grafico y registra la sesion."""
 
-    def __init__(self, port, maxlen, log, base, default_fs, odr=None, rango=None):
+    def __init__(self, port, maxlen, log, base, default_fs, odr=None, rango=None, eje=None):
         super().__init__(daemon=True)
-        self.cap = Captura(port, base, odr, rango, nota="monitor_vivo")
+        self.cap = Captura(port, base, odr, rango, nota="monitor_vivo", eje=eje)
         self.log = log
         self.fs = default_fs
         self.samples = collections.deque(maxlen=maxlen)   # (n, x_g, y_g, z_g)
@@ -454,6 +455,8 @@ def main():
                         help="Cambia el ODR del sensor al arrancar: 100, 200, 400, 800, 1600 o 3200")
     parser.add_argument("--rango", type=int, choices=(2, 4, 8, 16), default=None,
                         help="Cambia el rango del sensor al arrancar, en g")
+    parser.add_argument("--eje", choices=("x", "y", "z"), default=None,
+                        help="Eje que filtra el micro (sin esto queda el que tenga; al alimentar la placa, z)")
     parser.add_argument("--no-csv", action="store_true", help="No guarda las muestras crudas")
     args = parser.parse_args()
 
@@ -465,7 +468,7 @@ def main():
 
     try:
         reader = Reader(args.port, int(args.window * FS_MAX), log,
-                        None if args.no_csv else base, args.fs, args.odr, args.rango)
+                        None if args.no_csv else base, args.fs, args.odr, args.rango, args.eje)
     except serial.SerialException as e:
         log.write(f"No se pudo abrir {args.port}: {e}")
         log.close()

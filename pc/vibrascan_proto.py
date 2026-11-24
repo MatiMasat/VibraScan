@@ -59,6 +59,8 @@ SEQ_MOD = 1 << 16
 T_MOD = 1 << 32
 GAP_PERIODS = 1.5   # mas de 1,5 periodos entre muestras = hueco
 CLOCK_TOLERANCE = 0.02  # error admitido del periodo estimado, sobre el tiempo esperado
+LEARN_BLOCKS = 4        # bloques para medir el periodo al arrancar, antes de exigir CLOCK_TOLERANCE
+LEARN_TOLERANCE = 0.05  # mientras tanto, lo que puede apartarse del nominal (etapa 7: se vio 2,1 %)
 
 
 def crc16(data):
@@ -233,6 +235,7 @@ class Checker:
     _blk: Block = None
     _t_ext: int = 0         # t0 sin vueltas, en us
     _period: float = None   # us entre muestras, medido
+    _learn: list = field(default_factory=list)  # periodos de los primeros bloques
     _seq_lost: bool = False # se perdieron tramas desde el ultimo bloque
 
     def _event(self, kind, text, block=None, count=0):
@@ -272,6 +275,7 @@ class Checker:
             self._seq_lost = False
             self._t_ext = blk.t0
             self._period = 1e6 / blk.odr if blk.odr else None
+            self._learn = []
             if blk.flags & FLAG_FIRST:
                 self._event("inicio", f"primer bloque desde start (n0={blk.n0})", blk)
             self._blk = blk
@@ -280,6 +284,7 @@ class Checker:
             self._event("odr", f"odr {prev.odr} -> {blk.odr} Hz", blk)
             self._t_ext += (blk.t0 - prev.t0) % T_MOD
             self._period = 1e6 / blk.odr if blk.odr else None
+            self._learn = []
             self._blk = blk
             return
 
@@ -298,7 +303,9 @@ class Checker:
         if self._period and steps > 0:
             expected = steps * self._period
             extra = dt - expected
-            limit = max((GAP_PERIODS - 1) * self._period, CLOCK_TOLERANCE * expected)
+            learning = len(self._learn) < LEARN_BLOCKS
+            tol = LEARN_TOLERANCE if learning else CLOCK_TOLERANCE
+            limit = max((GAP_PERIODS - 1) * self._period, tol * expected)
             if extra > limit or blk.flags & FLAG_GAP:
                 missing = max(0, round(extra / self._period))
                 self.gaps += 1
@@ -317,7 +324,14 @@ class Checker:
                 # puede arrastrar la estimacion (si no, cada bloque siguiente
                 # pareceria un hueco y el error no se corregiria nunca).
                 measured = dt / steps
-                if abs(measured - self._period) <= CLOCK_TOLERANCE * self._period:
+                if learning:
+                    # El reloj del sensor puede apartarse del nominal mas de lo que
+                    # se admite despues: al juntar LEARN_BLOCKS se toma la mediana
+                    # (un bloque malo no la mueve)
+                    self._learn.append(measured)
+                    if len(self._learn) == LEARN_BLOCKS:
+                        self._period = sorted(self._learn)[(LEARN_BLOCKS - 1) // 2]
+                elif abs(measured - self._period) <= CLOCK_TOLERANCE * self._period:
                     self._period += (measured - self._period) * 0.1
         self._blk = blk
 
@@ -333,9 +347,9 @@ class Checker:
 
 # ---- Herramienta de linea de comandos ---------------------------------------
 
-def open_stream(port, odr=None, rango=None):
+def open_stream(port, odr=None, rango=None, eje=None):
     """Abre el puerto, detiene un envio anterior, descarta lo viejo, configura
-    ODR y rango (si se piden) y manda start."""
+    ODR, rango y eje del filtro (si se piden) y manda start."""
     import serial
 
     ser = serial.Serial(port, 115200, timeout=0.1)
@@ -346,6 +360,8 @@ def open_stream(port, odr=None, rango=None):
         ser.write(f"odr={odr}\n".encode("ascii"))
     if rango:
         ser.write(f"rango={rango}\n".encode("ascii"))
+    if eje:
+        ser.write(f"eje={eje}\n".encode("ascii"))
     ser.write(b"start\n")
     return ser
 

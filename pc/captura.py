@@ -37,13 +37,15 @@ def main():
     parser.add_argument("--nota", default="", help="Texto libre que queda en el JSON")
     parser.add_argument("--odr", type=int, choices=(100, 200, 400, 800, 1600, 3200), default=None)
     parser.add_argument("--rango", type=int, choices=(2, 4, 8, 16), default=None, help="Rango en g")
+    parser.add_argument("--eje", choices=("x", "y", "z"), default=None,
+                        help="Eje que filtra el micro (sin esto queda el que tenga; al alimentar la placa, z)")
     parser.add_argument("--salida", default=None, help="Nombre base de los archivos (sin extension)")
     args = parser.parse_args()
 
     seconds = args.minutos * 60 if args.minutos is not None else args.segundos
     base = args.salida or os.path.join(CAPTURES_DIR, f"captura_{time.strftime('%Y%m%d_%H%M%S')}")
     try:
-        cap = Captura(args.port, base, args.odr, args.rango, args.nota)
+        cap = Captura(args.port, base, args.odr, args.rango, args.nota, args.eje)
     except serial.SerialException as e:
         print(f"No se pudo abrir {args.port}: {e}")
         return 2

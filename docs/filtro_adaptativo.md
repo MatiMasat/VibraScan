@@ -97,8 +97,8 @@ mientras que LMS, con un paso que funciona bien para la señal original,
 Todos menos ε y el pasaaltos se cambian sin recompilar, con comandos por el
 puerto: `filtro=nlms|off`, `eje=x|y|z`, `taps=1..64`, `delta=1..32`,
 `mu=1..1999` (milésimas). Cada cambio reinicia el filtro y se informa en la
-trama de estado (y queda en el JSON de cada captura). Hoy no hay un script de
-la PC que mande estos comandos (`captura.py` solo manda `odr=` y `rango=`).
+trama de estado (y queda en el JSON de cada captura). Desde la PC, `captura.py` y
+`monitor_vivo.py` mandan el eje con `--eje`; los demás no tienen un script que los mande.
 
 ### Eje: Z
 

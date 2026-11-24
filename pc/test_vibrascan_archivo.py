@@ -116,6 +116,41 @@ class TestEnvolvente(unittest.TestCase):
         self.assertIs(tx, t)
 
 
+class TestReposo(unittest.TestCase):
+    def eventos(self, tramos):
+        """tramos: [(media en cuentas, sacudida en cuentas)] de ~2 s cada uno a 100 Hz."""
+        rng = np.random.default_rng(2)
+        flujo, seq, n = vp.build_frame(vp.TYPE_STATUS, 0, b"estado=OK etapa=7 odr=100 rango=16"), 1, 0
+        for media, ruido in tramos:
+            for _ in range(8):
+                m = [tuple(int(v) for v in np.round(np.array(media) + rng.normal(0, ruido, 3))) for _ in range(32)]
+                flujo += vp.build_frame(vp.TYPE_SAMPLES, seq, vp.build_block_payload(
+                    n, n * 10000, 100, vp.FLAG_FIRST if n == 0 else 0, m))
+                seq, n = seq + 1, n + 32
+        with mock.patch("vibrascan_captura.vp.open_stream", return_value=PuertoFalso(flujo)) as abrir:
+            cap = Captura("COMx", eje="y")
+            ev = []
+            while cap.ser.in_waiting:
+                ev += cap.poll()[1]
+        self.assertEqual(abrir.call_args[0][3], "y")
+        return [t for k, t in ev if k == "reposo"]
+
+    def test_normal_no_avisa(self):
+        self.assertEqual(self.eventos([((-13, 258, -23), 2), ((-13, 258, -23), 100), ((-13, 258, -23), 2)]), [])
+
+    def test_offset_corrido_desde_el_principio(self):
+        ev = self.eventos([((282, 457, -25), 2)])          # caso real: |a| = 2,1 g
+        self.assertEqual(len(ev), 1)
+        self.assertIn("REVISAR", ev[0])
+
+    def test_offset_que_cambia_y_vuelve(self):
+        # Caso real: x corrido 0,5 g deja |a| en 1,1 g; lo delata el cambio
+        ev = self.eventos([((-13, 258, -23), 2), ((115, 258, -23), 2), ((-13, 258, -23), 2)])
+        self.assertEqual(len(ev), 2)
+        self.assertIn("REVISAR", ev[0])
+        self.assertIn("volvio", ev[1])
+
+
 class TestCaptura(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()

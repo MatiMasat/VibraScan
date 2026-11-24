@@ -24,6 +24,7 @@ META_S segundos: si el programa se corta, lo grabado queda en disco.
 
 import datetime
 import json
+import math
 import os
 import time
 
@@ -40,6 +41,10 @@ MAX_EVENTS = 2000           # eventos guardados en el JSON
 DISCONTINUIDADES = ("seq", "n", "hueco", "odr", "tiempo")   # eventos de vp.Checker que abren segmento
 COUNTERS = ("ovr", "bus_err", "drop", "stall", "bfull", "hueco")   # bus_err: i2c_err hasta la etapa 5
 CORRUPTAS_EVENTOS = 20      # muestras imposibles que se informan una por una
+REPOSO_S = 1.0              # control de reposo: ventana
+REPOSO_RUIDO_G = 0.03       # quieto: cada eje con menos rms que esto
+REPOSO_MODULO_G = 0.15      # |a| quieto a 1 g +/- esto
+REPOSO_CAMBIO_G = 0.1       # y cada eje a menos de esto del primer reposo de la captura
 
 
 def limites_cuentas(rango):
@@ -89,7 +94,8 @@ class Captura:
     en vivo) y los eventos nuevos como (tipo, texto).
     """
 
-    def __init__(self, port, base=None, odr=None, rango=None, nota=""):
+    def __init__(self, port, base=None, odr=None, rango=None, nota="", eje=None):
+        self.eje_req = eje
         self.port, self.base, self.odr_req, self.rango_req, self.nota = port, base, odr, rango, nota
         self.inicio = datetime.datetime.now().isoformat(timespec="seconds")
         self.t_pc0 = time.monotonic()
@@ -115,6 +121,9 @@ class Captura:
         self.tmin = self.tmax = None
         self.samples = 0
         self.corruptas = 0
+        self._rep = []                  # muestras de la ventana del control de reposo
+        self._rep_ref = None            # media del primer reposo, en g
+        self._rep_mal = False
         self.reconexiones = 0
         self.events = []
         self._pending = []
@@ -137,7 +146,7 @@ class Captura:
 
     def _open(self, first=False):
         try:
-            self.ser = vp.open_stream(self.port, self.odr_req, self.rango_req)
+            self.ser = vp.open_stream(self.port, self.odr_req, self.rango_req, self.eje_req)
         except (serial.SerialException, OSError):
             if first:
                 raise
@@ -287,6 +296,7 @@ class Captura:
             self.csv.write("".join(f"{self.seg},{blk.n0 + i},{t_base + i * period / 1e6:.6f},{x},{y},{z}\n"
                                    for i, (x, y, z) in enumerate(blk.samples)))
         self._corruptas(blk)
+        self._reposo(blk)
         self.reg.add(blk.n0, t_ext)
         self.segments[-1]["muestras"] += len(blk.samples)
         self.samples += len(blk.samples)
@@ -303,6 +313,31 @@ class Captura:
                                         f"con rango {self.rango} g")
                 if self.corruptas == CORRUPTAS_EVENTOS:
                     self._event("corrupta", "no se informan mas una por una; el total queda en el resumen")
+
+    def _reposo(self, blk):
+        """Con el sensor quieto tiene que medir ~1 g y siempre lo mismo. Si no, avisa
+        (una vez por cambio): una perturbacion electrica puede dejar corridos los
+        registros de offset del sensor (etapa 7), o el sensor se movio."""
+        self._rep += [s for s in blk.samples if not muestra_imposible(s, self.rango)]
+        k = len(self._rep)
+        if k < REPOSO_S * blk.odr:
+            return
+        ejes, self._rep = list(zip(*self._rep)), []
+        media = [sum(e) / k * G_PER_LSB for e in ejes]
+        rms = [math.sqrt(sum((v * G_PER_LSB - m) ** 2 for v in e) / k) for e, m in zip(ejes, media)]
+        if max(rms) > REPOSO_RUIDO_G:
+            return
+        modulo = math.sqrt(sum(m * m for m in media))
+        if self._rep_ref is None:
+            self._rep_ref = media
+        cambio = [m - r for m, r in zip(media, self._rep_ref)]
+        mal = abs(modulo - 1.0) > REPOSO_MODULO_G or max(abs(c) for c in cambio) > REPOSO_CAMBIO_G
+        if mal != self._rep_mal:
+            self._rep_mal = mal
+            self._event("reposo", ("REVISAR EL SENSOR: " if mal else "el reposo volvio a lo normal: ")
+                        + f"|a| = {modulo:.2f} g, media x/y/z " + "/".join(f"{m:+.2f}" for m in media)
+                        + " g, cambio desde el primer reposo " + "/".join(f"{c:+.2f}" for c in cambio) + " g"
+                        + (" (se movio o se corrio el offset: cortar el USB 30 s lo borra)" if mal else ""))
 
     def _close_regression(self):
         if self.reg is not None and self.segments:

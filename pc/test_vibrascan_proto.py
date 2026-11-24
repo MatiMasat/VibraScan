@@ -12,7 +12,7 @@ import vibrascan_proto as p
 PERIOD_US = 1258  # periodo real medido a 800 Hz nominales
 
 
-def make_stream(n_blocks, seq0=0, n_start=0, t_start=0, first=True, odr=800):
+def make_stream(n_blocks, seq0=0, n_start=0, t_start=0, first=True, odr=800, period=PERIOD_US):
     """Tramas de un flujo sin perdidas: estado + n_blocks bloques de 32 muestras."""
     frames = [p.build_frame(p.TYPE_STATUS, seq0, b"estado=OK etapa=3 odr=800")]
     n, t = n_start, t_start
@@ -22,7 +22,7 @@ def make_stream(n_blocks, seq0=0, n_start=0, t_start=0, first=True, odr=800):
         frames.append(p.build_frame(p.TYPE_SAMPLES, seq0 + 1 + k,
                                     p.build_block_payload(n, t, odr, flags, samples)))
         n += p.BLOCK_SAMPLES
-        t += p.BLOCK_SAMPLES * PERIOD_US
+        t += round(p.BLOCK_SAMPLES * period)
     return frames
 
 
@@ -176,6 +176,21 @@ class TestChecker(unittest.TestCase):
         _, chk, _ = decode_all(b"".join(make_stream(200)))
         self.assertAlmostEqual(chk.period_us, PERIOD_US, delta=1)
         self.assertEqual(chk.gaps, 0)
+
+    def test_reloj_lejos_del_nominal(self):
+        # Caso real (2026-11-24): 319,12 us a 3200 Hz, 2,1 % sobre el nominal. Cada
+        # bloque salia como un hueco; en el otro sentido, como un error de hora.
+        for period in (319.125, 306.0):
+            _, chk, _ = decode_all(b"".join(make_stream(200, odr=3200, period=period)))
+            self.assertEqual((chk.gaps, chk.time_errors), (0, 0))
+            self.assertAlmostEqual(chk.period_us, period, delta=0.1)
+
+    def test_reloj_lejos_sigue_viendo_una_muestra_perdida(self):
+        a = make_stream(20, odr=3200, period=319.125)
+        t = 20 * round(32 * 319.125) + 319
+        blk = p.build_block_payload(20 * 32, t, 3200, 0, [(0, 0, -256)] * 32)
+        _, chk, _ = decode_all(b"".join(a) + p.build_frame(p.TYPE_SAMPLES, 21, blk))
+        self.assertEqual((chk.gaps, chk.gap_samples), (1, 1))
 
     def test_vuelta_de_t0_y_seq(self):
         # t0 da la vuelta a los 2^32 us y seq a los 65536: no son perdidas
