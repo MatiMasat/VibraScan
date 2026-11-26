@@ -249,7 +249,132 @@ Cambio respecto de la marcha normal (25–75 s y 20–72 s; PSD de la suma de ej
   `monitor_20261106_172931` como resultado: hubo 754 muestras descartadas al inicio y no se
   registraron las maniobras.
 
-## 8. Pendiente
+## 8. Niveles del selector con el apoyo normal y desplazado (2026-11-24)
+
+Prueba equivalente a la del micrófono del otro integrante de la beca: los cinco niveles del
+selector de tensión (un regulador de ventilador de techo de cinco pasos, instalado desde el
+2026-11-06), cada uno con el apoyo del extremo opuesto del eje en su posición normal y desplazado
+**≈ 3 mm hacia arriba**. En el informe del micrófono esta maniobra se llama "carga simulada" o
+"freno manual": es el mismo desplazamiento del apoyo.
+
+**Numeración:** la del informe del micrófono, con el selector girado en el mismo sentido:
+**Nivel 1 = máxima potencia, Nivel 5 = mínima**. Las capturas se llaman `serie1124_p<nivel>_<N|A>`
+(N: apoyo normal; A: desplazado).
+
+### Montaje y método
+
+- Sensor sobre la carcasa con **Y hacia arriba** (otro montaje que el 6/11: los niveles en mg no se
+  comparan con los de esa fecha). Filtro del micro en Y (`--eje y`), 3200 Hz, ±16 g.
+- Una captura por condición. El apoyo se movía **con el motor apagado**; el motor andaba ~15–20 s.
+  Se analiza el tramo estable, sin el arranque ni el apagado (en general unos 12 s).
+- Las líneas que se comparan se fijaron antes de estas capturas: la de 2× la rotación (~49 Hz), la
+  de 1× (~24,5 Hz) y la de 100 Hz, además de la vibración total. Se miden en la **suma de los tres
+  ejes**, como amplitud rms de la línea sobre el piso de ruido.
+- Orden real (hora): 3N, 3A, 1A, 1N, 5N (dos veces), 5A, 2A, 2N, 3N de nuevo, 3N y 3A de nuevo
+  (`f1_N`, `f2_A`), 4N y 4A. Antes de 4N y 4A el sensor se giró ~17° al revisar los cables, y esas
+  dos se grabaron con el motor ya andando (al prender hubo fallas, ver abajo).
+- Figuras: `python informe_apoyo.py` (desde `pc/`, con las capturas) las escribe en
+  `docs/img/niveles/`.
+
+![10 espectros en escala común](img/niveles/psd_niveles.png)
+
+*Espectro (Welch, suma de ejes) de los 10 ensayos en la misma escala, como la Figura 1 del informe
+del micrófono. Izquierda: apoyo normal; derecha: desplazado. Arriba el Nivel 5 (mínima potencia),
+abajo el 1 (máxima). Triángulos: 100 Hz y múltiplos; rombo: 2× la rotación. Cada panel está también
+por separado en `docs/img/niveles/nivel<k>_<normal|desplazado>.png`.*
+
+![Apoyo normal y desplazado superpuestos](img/niveles/superpuestas_niveles.png)
+
+![10 espectrogramas](img/niveles/espectrogramas_niveles.png)
+
+*Espectrogramas de las 10 capturas completas, misma escala de color. Las líneas blancas marcan el
+tramo usado en el espectro. En el Nivel 4 el motor ya andaba al empezar a grabar.*
+
+### Resultados
+
+| Nivel | Apoyo | Captura | Total | 100 Hz | 1× | **2×** | Velocidad (1×) |
+|---|---|---|---|---|---|---|---|
+| 5 | normal | `p5_N2` | 1399 mg | 1096 mg | 4,4 mg | **19,9 mg** | 24,14 Hz |
+| 5 | desplazado | `p5_A` | 1566 mg | 1076 mg | 8,1 mg | **18,6 mg** | 23,96 Hz |
+| 4 | normal | `p4_N2` | 604 mg | 551 mg | 5,6 mg | **10,6 mg** | 24,33 Hz |
+| 4 | desplazado | `p4_A` | 577 mg | 505 mg | 7,9 mg | **36,0 mg** | 24,29 Hz |
+| 3 | normal | `p3_N` | 267 mg | 236 mg | 4,4 mg | **2,8 mg** | 24,43 Hz |
+| 3 | desplazado | `p3_A` | 285 mg | 241 mg | 6,9 mg | **35,9 mg** | 24,39 Hz |
+| 2 | normal | `p2_N` | 169 mg | 145 mg | 5,3 mg | **15,7 mg** | 24,53 Hz |
+| 2 | desplazado | `p2_A` | 225 mg | 174 mg | 7,4 mg | **43,6 mg** | 24,45 Hz |
+| 1 | normal | `p1_N` | 118 mg | 89 mg | 2,3 mg | **3,1 mg** | 24,53 Hz |
+| 1 | desplazado | `p1_A` | 140 mg | 100 mg | 6,4 mg | **40,2 mg** | 24,50 Hz |
+| 3 (rep.) | normal | `f1_N` | 376 mg | 355 mg | 3,6 mg | **8,5 mg** | 24,40 Hz |
+| 3 (rep.) | desplazado | `f2_A` | 424 mg | 377 mg | 6,7 mg | **35,4 mg** | 24,35 Hz |
+
+![Línea de 2x por nivel](img/niveles/linea_2x_niveles.png)
+
+- **Niveles 1 a 4: la línea de 2× sube al desplazar el apoyo**, de 3–16 mg a 35–44 mg (entre ×2,8 y
+  ×13; ×4,1 en la repetición del Nivel 3). El menor valor con el apoyo desplazado (35,4 mg) es más
+  del doble del mayor con el apoyo normal (15,7 mg).
+- El aumento varía tanto porque varía el valor con el apoyo normal (de 2,8 a 15,7 mg, y en el
+  Nivel 3 de 2,8 a 10,2 mg entre encendidos). Con el apoyo desplazado el valor es estable (35–44 mg).
+- **La vibración total y la línea de 100 Hz casi no cambian** con el apoyo (total entre −4 % y +34 %;
+  100 Hz entre −8 % y +21 %): por sí solas no detectan el desplazamiento.
+- La línea de 1× sube algo (×1,4 a ×2,8), pero sus valores son chicos y del orden de la variación
+  entre encendidos.
+- **Nivel 5: no hay cambio** (19,9 y 18,6 mg). En ese nivel la maqueta **golpeaba**, la vibración
+  variaba durante la marcha (14–19 %) y dos encendidos con el apoyo normal dieron 833 y 1399 mg.
+- **La velocidad casi no cambia con el apoyo** (0,03–0,18 Hz menos, 2–11 rpm): el desplazamiento no
+  frena el motor de forma apreciable.
+
+### Comparación con el micrófono
+
+| | Micrófono | Acelerómetro |
+|---|---|---|
+| 100 Hz y múltiplos | Sí | Sí |
+| Bandas a ~±24,5 Hz (4 polos) | Sí, ~1400–1440 rpm | Sí, 1× = 23,96–24,53 Hz (1438–1472 rpm), sin verificar con tacómetro |
+| **2× (~47–49 Hz) con el apoyo desplazado** | Aparece en los Niveles 3, 2 y 1 | Sube en los Niveles 4, 3, 2 y 1 |
+| Nivel 5 con el apoyo desplazado | Velocidad cae a ~1000 rpm | Sin cambio en 2×; la maqueta golpeaba; velocidad −0,18 Hz |
+| Nivel 4 con el apoyo desplazado | El rotor casi se detiene (solo quedan múltiplos de 100 Hz) | El rotor sigue girando (24,29 Hz) y 2× sube |
+| Nivel del espectro según la potencia | Más energía y más picos hacia el Nivel 1 (máxima) | **Al revés:** la vibración y los 100 Hz crecen hacia el Nivel 5 |
+
+- **Coinciden en lo principal:** con los dos sensores, la línea de ~49 Hz (2× la rotación) es la que
+  mejor marca el desplazamiento del apoyo en los niveles de más potencia.
+- **No coinciden** en el Nivel 4 y en cómo cambia el espectro con el nivel. Las mediciones no fueron
+  simultáneas y la maniobra se hizo a mano, así que la carga real pudo ser distinta.
+- **Contradicción sin resolver:** con la numeración común, la velocidad del acelerómetro es mayor en
+  el Nivel 1 (coherente con "máxima potencia"), pero la línea de 100 Hz, que crece con la tensión, es
+  la menor en el Nivel 1 (coherente con "mínima"). Hay que verificar la numeración o el tipo de
+  regulador; no se midió la tensión.
+
+### Alcance
+
+- **Medido:** la línea de 2× sube al desplazar el apoyo en los Niveles 1–4, en cinco comparaciones.
+- **Interpretación:** que suba el 2× es **compatible** con una desalineación del eje; no se midió la
+  alineación.
+- Una captura por condición (dos en el Nivel 3, con el orden N/A alternado en los Niveles 1–3). No se
+  comprobó, dentro de una misma serie sin tocar nada, que 2× vuelva a bajar al regresar a N.
+- Después del golpeteo del Nivel 5 la maqueta cambió: el Nivel 3 con el apoyo normal pasó de 267 a
+  453 mg. Al revisarla no se encontró nada flojo.
+- El 6/11 respondió la línea de 1× (~24,5 Hz) y el 24/11 la de 2×: son montajes distintos.
+- Desplazamiento ≈ 3 mm, tensión y velocidad sin instrumento de referencia.
+
+### Problemas del 24/11
+
+- **Al prender y apagar el motor** llegaron lecturas imposibles (entre 1 y 23 por captura en 8 de las
+  10), horas corridas y huecos breves, siempre fuera del tramo analizado. El reposo de cada captura
+  quedó igual al inicial salvo cuando se movió el sensor.
+- **Offsets corridos:** en una sesión de prueba X e Y quedaron corridos +0,81 g y en otra X +0,50 g
+  (múltiplos exactos del paso del registro de offset del ADXL345). No altera el espectro (se resta la
+  media); se borró cortando el USB. Desde ahí `captura.py` y el monitor avisan (`REPOSO`).
+- **El sensor dejó de responder dos veces al prender el motor** (`f3_N`: `devid = 0x00` hasta cortar el
+  USB; `p4_N`: el flujo se detuvo). Esas dos capturas se descartaron. Por eso 4N y 4A se grabaron con
+  el motor ya andando.
+- **El reloj del sensor** llegó a 3134 Hz (2,1 % bajo el nominal) y la PC marcaba cada bloque como
+  un hueco; se corrigió en `vibrascan_proto.py`.
+- **Filtro del micro:** `etapa7_prueba.py equivalencia` aprueba en las 5 capturas de la serie sin
+  lecturas corruptas o con pocas (`p1_A`, `p2_A`, `p3_A`, `p4_N2`, `p4_A`: 2–25 µg) y falla en las otras 5
+  (`p1_N`, `p3_N`, `p5_N2`, `p5_A`: 188–590 µg; `p2_N`, con 23 lecturas corruptas y el sensor perdido
+  0,6 s: 49 mg). Todas las que fallan tienen lecturas corruptas en la entrada, pero no se confirmó la
+  causa. Las FFT de esta sección no usan el filtro.
+
+## 9. Pendiente
 
 - **Repetir el movimiento del apoyo con desplazamientos medidos**, fijando antes las líneas y
   los umbrales a evaluar.

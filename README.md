@@ -532,6 +532,7 @@ elegir esta carpeta (sin copiar) y compilar. Para grabar, Run o Debug con
     pc/vibrascan_motor.py  velocidad de un motor a partir de su vibración (etapa 7)
     pc/test_vibrascan_motor.py  pruebas de la velocidad con un motor sintético, sin placa
     pc/etapa7_prueba.py    prueba de aceptación de la etapa 7 (equivalencia, tono, motor)
+    pc/informe_apoyo.py    figuras de los niveles con el apoyo normal y desplazado (docs/prueba_motor.md, sección 8)
     pc/monitor_vivo.py     gráfico en tiempo real y registro de la sesión
     test_fw/test_adxl345.c prueba del driver en la PC contra un sensor simulado (gcc)
     pc/etapa2_prueba.py    prueba de la etapa 2 (no sirve con el firmware de la 3;
